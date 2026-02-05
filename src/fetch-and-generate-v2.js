@@ -2,7 +2,6 @@ import fetch from 'node-fetch';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { filterRecentTweets, formatTimeAgo } from './time-filter.js';
 import { 
   loadTweetState, 
   saveTweetState, 
@@ -10,6 +9,9 @@ import {
   filterNewTweets,
   batchUpdateState 
 } from './tweet-state.js';
+import { filterTweetsByTime, formatTweetTime, getTweetTimeFromId } from './tweet-time.js';
+import { loadStoredFollowing, syncFollowingList } from './following-fetcher.js';
+import { analyzeTwitterDigest } from './ai-analyzer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, '..', 'data');
@@ -24,13 +26,27 @@ const USE_TWEET_ID_MODE = true;
 const JINA_API_KEY = 'jina_422c9ce559de4c519e827233cdcd90a0E22LcYJzishlFevVhkXkuuHXS_0G';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 
-// 用户列表
-const USERS = [
-  'LiorOnAI', 'cjpedregal', 'steph_palazzolo', 'gdb', 'indigox',
+// 用户列表 - 从 following-list.json 加载，或使用默认
+async function loadUserList() {
+  try {
+    const listPath = path.join(dataDir, 'following-list.json');
+    const content = await fs.readFile(listPath, 'utf-8');
+    const data = JSON.parse(content);
+    console.log(`📋 从 following-list.json 加载了 ${data.users.length} 个用户`);
+    return data.users;
+  } catch (error) {
+    console.log('⚠️ 无法加载 following-list.json，使用默认用户列表');
+    return DEFAULT_USERS;
+  }
+}
+
+const DEFAULT_USERS = [
+  'lexfridman', 'LiorOnAI', 'cjpedregal', 'steph_palazzolo', 'gdb', 'indigox',
   'borgeaud_s', 'dwarkesh_sp', '_The_Prophet__', 'gregisenberg',
   'omarsar0', 'onechancefreedm', 'akshay_pachaar', 'dair_ai',
   'rasbt', 'chetaslua', 'Thom_Wolf', 'soumithchintala', 'mattshumer_',
-  'emollick', 'michaeljburry', 'JeffDean', 'EpochAIResearch', 'METR_Evals'
+  'emollick', 'michaeljburry', 'JeffDean', 'EpochAIResearch', 'METR_Evals',
+  'ilyasut', 'karpathy', 'OriolVinyalsML'
 ];
 
 async function sleep(ms) {
@@ -65,6 +81,8 @@ async function getUserTimeline(username) {
       'Authorization': `Bearer ${JINA_API_KEY}`,
       'X-Return-Format': 'markdown',
       'X-With-Generated-Alt': 'true',
+      'X-No-Cache': 'true',
+      'X-Timeout': '30',
     },
   });
   
@@ -73,7 +91,9 @@ async function getUserTimeline(username) {
   }
   
   const markdown = await response.text();
-  return parseTwitterMarkdown(username, markdown);
+  const data = parseTwitterMarkdown(username, markdown);
+  warnIfAllTweetsOlderThanDays(username, data.tweets, 7, new Date(data.fetchedAt));
+  return data;
 }
 
 /**
@@ -97,22 +117,40 @@ function parseTwitterMarkdown(username, markdown) {
     userInfo.followers = parseFollowerCount(followersMatch[1]);
   }
   
-  // 查找推文链接模式
-  const tweetPattern = /\[(\d+[hms]|[A-Z][a-z]{2}\s+\d{1,2}(?:,\s*\d{4})?)\]\((https:\/\/x\.com\/\w+\/status\/\d+)\)/g;
-  const tweetMatches = [...markdown.matchAll(tweetPattern)];
+  // 新解析策略：直接查找所有 tweet URL，不依赖时间格式
+  // 匹配 https://x.com/username/status/ID 格式
+  const tweetUrlPattern = /https:\/\/x\.com\/(\w+)\/status\/(\d+)/g;
+  const urlMatches = [...markdown.matchAll(tweetUrlPattern)];
   
-  for (let i = 0; i < tweetMatches.length; i++) {
-    const match = tweetMatches[i];
-    const timeStr = match[1];
-    const tweetUrl = match[2];
+  // 去重 URL（同一条推文可能出现多次）
+  const seenUrls = new Set();
+  const uniqueMatches = urlMatches.filter(match => {
+    const url = match[0];
+    if (seenUrls.has(url)) return false;
+    seenUrls.add(url);
+    return true;
+  });
+  
+  for (let i = 0; i < uniqueMatches.length; i++) {
+    const match = uniqueMatches[i];
+    const tweetUrl = match[0];
+    const tweetAuthor = match[1];
+    const tweetId = match[2];
     const matchIndex = match.index;
     
-    const nextMatch = tweetMatches[i + 1];
-    const endIndex = nextMatch ? nextMatch.index : markdown.length;
+    // 跳过其他用户的推文（引用、转发等），只保留目标用户的
+    if (tweetAuthor.toLowerCase() !== username.toLowerCase()) {
+      continue;
+    }
     
-    const tweetSection = markdown.slice(matchIndex, endIndex);
+    const nextMatch = uniqueMatches[i + 1];
+    const endIndex = nextMatch ? nextMatch.index : Math.min(matchIndex + 2000, markdown.length);
     
-    const tweet = parseTweetSection(tweetSection, timeStr, tweetUrl, username);
+    // 向前也取一些内容（推文文本可能在 URL 之前）
+    const startIndex = Math.max(0, matchIndex - 500);
+    const tweetSection = markdown.slice(startIndex, endIndex);
+    
+    const tweet = parseTweetSection(tweetSection, null, tweetUrl, username);
     if (tweet) {
       tweets.push(tweet);
     }
@@ -134,6 +172,23 @@ function parseTwitterMarkdown(username, markdown) {
   };
 }
 
+function warnIfAllTweetsOlderThanDays(username, tweets, days, now = new Date()) {
+  if (!tweets || tweets.length === 0) return;
+  
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  const parsedTimes = tweets
+    .map(tweet => getTweetTimeFromId(tweet.tweetId))
+    .filter(Boolean);
+  
+  if (parsedTimes.length === 0) return;
+  
+  const newest = parsedTimes.reduce((a, b) => (a > b ? a : b));
+  
+  if (parsedTimes.every(time => time < cutoff)) {
+    console.log(`⚠️  @${username}: 所有推文时间都超过 ${days} 天（最新: ${newest.toISOString().split('T')[0]}），可能是缓存数据`);
+  }
+}
+
 /**
  * 解析单条推文区块
  */
@@ -143,8 +198,9 @@ function parseTweetSection(section, timeStr, tweetUrl, currentUser) {
     ? `https://x.com/${currentUser}/status/${tweetId}`
     : tweetUrl;
 
-  // 清理文本
+  // 清理文本：移除 URL 本身和图片标记
   let text = section
+    .replace(new RegExp(tweetUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '') // 移除当前 URL
     .replace(/\[!\[Image[^\]]*\]\([^)]*\)\]\([^)]*\)/g, '')
     .replace(/!\[Image[^\]]*\]\([^)]*\)/g, '')
     .replace(/\[[^\]]*\]\([^)]*\)/g, ' ')
@@ -193,7 +249,7 @@ function parseTweetSection(section, timeStr, tweetUrl, currentUser) {
 /**
  * 获取所有用户推文 (支持 tweetId 增量模式 + 时间过滤)
  */
-async function fetchAllUsers() {
+async function fetchAllUsers(users) {
   const allData = [];
   const failed = [];
   const noRecentTweets = [];
@@ -206,8 +262,8 @@ async function fetchAllUsers() {
   // 加载上次的推文状态
   const tweetState = USE_TWEET_ID_MODE ? await loadTweetState() : {};
   
-  for (let i = 0; i < USERS.length; i++) {
-    const username = USERS[i];
+  for (let i = 0; i < users.length; i++) {
+    const username = users[i];
     try {
       const data = await getUserTimeline(username);
       const fetchedAt = new Date(data.fetchedAt);
@@ -239,8 +295,8 @@ async function fetchAllUsers() {
         }
       }
       
-      // 模式2: 时间过滤（作为兜底或额外过滤）
-      const { filtered, stats } = filterRecentTweets(filteredTweets, FILTER_HOURS, fetchedAt);
+      // 模式2: 用 snowflake ID 计算时间过滤（更准确！）
+      const { filtered, stats } = filterTweetsByTime(filteredTweets, FILTER_HOURS);
       
       totalFiltered += stats.filtered;
       totalKept += stats.kept;
@@ -251,13 +307,16 @@ async function fetchAllUsers() {
         data.newestTweetId = newestTweetId;
         allData.push(data);
         
-        const timeRange = stats.newestKept 
-          ? `(最新: ${formatTimeAgo(stats.newestKept)})` 
+        const timeRange = stats.newestTime 
+          ? `(最新: ${formatTweetTime(newestTweetId)})` 
           : '';
         console.log(`   ✓ @${username}: ${stats.kept}/${stats.total} 条近期推文 ${timeRange}`);
       } else {
         noRecentTweets.push(username);
-        console.log(`   ⏭ @${username}: 无近 ${FILTER_HOURS}h 推文 (共 ${stats.total} 条旧推文)`);
+        const newestInfo = stats.newestTime 
+          ? ` (最新: ${stats.newestTime.toISOString().split('T')[0]})`
+          : '';
+        console.log(`   ⏭ @${username}: 无近 ${FILTER_HOURS}h 推文 (共 ${stats.total} 条)${newestInfo}`);
       }
     } catch (error) {
       console.log(`   ✗ @${username}: 失败 - ${error.message}`);
@@ -266,7 +325,7 @@ async function fetchAllUsers() {
     
     // 进度汇报
     if ((i + 1) % 5 === 0) {
-      console.log(`   📊 进度: ${i + 1}/${USERS.length}`);
+      console.log(`   📊 进度: ${i + 1}/${users.length}`);
     }
     
     // 避免请求过快
@@ -279,7 +338,7 @@ async function fetchAllUsers() {
     await saveTweetState(tweetState);
   }
   
-  console.log(`\n📈 爬取完成: ${allData.length}/${USERS.length} 个用户有新内容`);
+  console.log(`\n📈 爬取完成: ${allData.length}/${users.length} 个用户有新内容`);
   console.log(`📊 过滤统计:`);
   if (USE_TWEET_ID_MODE) {
     console.log(`   🔖 ID跳过: ${totalSkippedById} 条 (已处理过的旧推文)`);
@@ -300,12 +359,66 @@ async function fetchAllUsers() {
 /**
  * 生成 Markdown 报告
  */
-function generateMarkdownReport(tweetsData, dateStr) {
+async function generateMarkdownReport(tweetsData, dateStr) {
   const lines = [];
   
   lines.push(`# Twitter 信源日报 - ${dateStr}\n`);
   lines.push(`> 信源数: ${tweetsData.length} | 时间范围: 过去 ${FILTER_HOURS} 小时 | 生成时间: ${new Date().toISOString()}\n`);
   lines.push('---\n');
+
+  let aiAnalysis;
+  try {
+    aiAnalysis = await analyzeTwitterDigest(tweetsData);
+  } catch (error) {
+    aiAnalysis = {
+      insights: [],
+      technicalDetails: [],
+      trends: [],
+      kolOpinions: [],
+      error: error.message,
+    };
+  }
+  lines.push('## 🤖 AI 分析\n');
+
+  lines.push('### 💡 今日 Insights\n');
+  if (aiAnalysis.insights.length > 0) {
+    aiAnalysis.insights.slice(0, 5).forEach((item, index) => {
+      lines.push(`${index + 1}. ${item.text} [原文](${item.url})`);
+    });
+  } else {
+    lines.push('- 暂无可用 insights（可能未配置 OPENROUTER_API_KEY 或输入数据为空）');
+  }
+  lines.push('');
+
+  lines.push('### 🔧 技术细节\n');
+  if (aiAnalysis.technicalDetails.length > 0) {
+    aiAnalysis.technicalDetails.forEach(detail => {
+      lines.push(`- ${detail}`);
+    });
+  } else {
+    lines.push('- 暂无');
+  }
+  lines.push('');
+
+  lines.push('### 📈 趋势观察\n');
+  if (aiAnalysis.trends.length > 0) {
+    aiAnalysis.trends.forEach(trend => {
+      lines.push(`- ${trend}`);
+    });
+  } else {
+    lines.push('- 暂无');
+  }
+  lines.push('');
+
+  lines.push('### 🎯 KOL 观点\n');
+  if (aiAnalysis.kolOpinions.length > 0) {
+    aiAnalysis.kolOpinions.forEach(opinion => {
+      lines.push(`- ${opinion.username}: ${opinion.text} [原文](${opinion.url})`);
+    });
+  } else {
+    lines.push('- 暂无');
+  }
+  lines.push('\n---\n');
   
   // 概览
   lines.push('## 📊 今日概览\n');
@@ -379,6 +492,31 @@ async function convertToPDF(markdownPath, pdfPath) {
   }
 }
 
+async function resolveUserList() {
+  try {
+    const result = await syncFollowingList('xxcc48764');
+    if (result?.users?.length > 0) {
+      const { added, removed } = result.diff || { added: [], removed: [] };
+      console.log(`👥 关注列表已更新: ${result.users.length} 人`);
+      if (added.length > 0 || removed.length > 0) {
+        console.log(`   新增: ${added.join(', ') || '无'} | 取消关注: ${removed.join(', ') || '无'}`);
+      }
+      return result.users;
+    }
+  } catch (error) {
+    console.log(`⚠️  关注列表更新失败: ${error.message}`);
+  }
+
+  const stored = await loadStoredFollowing();
+  if (stored?.users?.length > 0) {
+    console.log(`📁 使用本地 following.json 列表: ${stored.users.length} 人`);
+    return stored.users;
+  }
+
+  console.log(`📌 使用默认硬编码列表: ${DEFAULT_USERS.length} 人`);
+  return DEFAULT_USERS;
+}
+
 // 主程序
 async function main() {
   console.log('🚀 开始获取 Twitter 推文...\n');
@@ -389,9 +527,11 @@ async function main() {
   // 确保目录存在
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(reportsDir, { recursive: true });
+
+  const users = await resolveUserList();
   
   // 获取所有用户推文
-  const tweetsData = await fetchAllUsers();
+  const tweetsData = await fetchAllUsers(users);
   
   if (tweetsData.length === 0) {
     console.log('❌ 没有获取到任何数据');
@@ -404,7 +544,7 @@ async function main() {
   console.log(`\n💾 数据已保存: ${dataPath}`);
   
   // 生成 Markdown 报告
-  const mdReport = generateMarkdownReport(tweetsData, dateStr);
+  const mdReport = await generateMarkdownReport(tweetsData, dateStr);
   const mdPath = path.join(reportsDir, `twitter-daily-report-${dateStr}-v2.md`);
   await fs.writeFile(mdPath, mdReport);
   console.log(`📄 Markdown 报告: ${mdPath}`);

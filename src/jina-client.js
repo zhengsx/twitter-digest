@@ -1,6 +1,6 @@
 import fetch from 'node-fetch';
 import { config } from './config.js';
-import { filterRecentTweets, formatTimeAgo } from './time-filter.js';
+import { filterRecentTweets, formatTimeAgo, parseTweetTime } from './time-filter.js';
 
 /**
  * 使用 Jina Reader API 获取用户时间线
@@ -18,6 +18,8 @@ export async function getUserTimeline(username) {
         'Authorization': `Bearer ${config.jina.apiKey}`,
         'X-Return-Format': 'markdown',
         'X-With-Generated-Alt': 'true',
+        'X-No-Cache': 'true',
+        'X-Timeout': '30',
       },
     });
     
@@ -26,7 +28,9 @@ export async function getUserTimeline(username) {
     }
     
     const markdown = await response.text();
-    return parseTwitterMarkdown(username, markdown);
+    const data = parseTwitterMarkdown(username, markdown);
+    warnIfAllTweetsOlderThanDays(username, data.tweets, 7, new Date(data.fetchedAt));
+    return data;
   } catch (error) {
     console.error(`获取 @${username} 时间线失败:`, error.message);
     throw error;
@@ -135,6 +139,24 @@ function parseTwitterMarkdown(username, markdown) {
     rawMarkdown: markdown,
     fetchedAt: new Date().toISOString(),
   };
+}
+
+function warnIfAllTweetsOlderThanDays(username, tweets, days, fetchedAt) {
+  if (!tweets || tweets.length === 0) return;
+  
+  const now = fetchedAt instanceof Date ? fetchedAt : new Date();
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  const parsedTimes = tweets
+    .map(tweet => parseTweetTime(tweet.time, now))
+    .filter(Boolean);
+  
+  if (parsedTimes.length === 0) return;
+  
+  const newest = parsedTimes.reduce((a, b) => (a > b ? a : b));
+  
+  if (parsedTimes.every(time => time < cutoff)) {
+    console.log(`⚠️  @${username}: 所有推文时间都超过 ${days} 天（最新: ${newest.toISOString().split('T')[0]}），可能是缓存数据`);
+  }
 }
 
 /**
