@@ -1,0 +1,17 @@
+{
+  "name": "twitter-digest",
+  "version": "2.0.0",
+  "description": "每日 Twitter 信源追踪 + Gemini 报告生成 (Jina API)",
+  "main": "src/daily-job.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/daily-job.js",
+    "daily": "node src/daily-job.js",
+    "test": "node src/test-jina.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "node-fetch": "^3.3.0",
+    "pdfkit": "^0.17.2"
+  }
+}
