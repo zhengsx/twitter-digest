@@ -3,24 +3,16 @@
  * 绕过 Jina 缓存问题
  */
 
-import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { config } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(__dirname, '..', 'data');
 
 // 加载用户列表
 async function loadUserList() {
-  try {
-    const listPath = path.join(dataDir, 'following-list.json');
-    const content = await fs.readFile(listPath, 'utf-8');
-    const data = JSON.parse(content);
-    return data.users;
-  } catch (error) {
-    console.error('无法加载用户列表:', error.message);
-    return [];
-  }
+  const users = config.followingUsers || [];
+  return users.map(u => String(u).replace(/^@/, '')).filter(Boolean);
 }
 
 // 解析推文时间

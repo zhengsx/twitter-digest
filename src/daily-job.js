@@ -30,6 +30,7 @@ async function main() {
   console.log('🚀 Twitter Digest 日报生成开始 (Jina API)\n');
   console.log(`📅 日期: ${new Date().toISOString().split('T')[0]}`);
   console.log(`🔑 使用 Jina Reader API\n`);
+  console.log(`👥 配置 followingUsers: ${config.followingUsers.length}\n`);
   
   await ensureDirs();
   

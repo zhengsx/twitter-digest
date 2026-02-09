@@ -1,7 +1,7 @@
 import fetch from 'node-fetch';
-import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { config } from './config.js';
 import { 
   loadTweetState, 
   saveTweetState, 
@@ -26,18 +26,15 @@ const USE_TWEET_ID_MODE = true;
 const JINA_API_KEY = 'jina_422c9ce559de4c519e827233cdcd90a0E22LcYJzishlFevVhkXkuuHXS_0G';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 
-// 用户列表 - 从 following-list.json 加载，或使用默认
+// 用户列表 - 只从配置读取（避免 following-list.json 过时数据导致信源数量不对）
 async function loadUserList() {
-  try {
-    const listPath = path.join(dataDir, 'following-list.json');
-    const content = await fs.readFile(listPath, 'utf-8');
-    const data = JSON.parse(content);
-    console.log(`📋 从 following-list.json 加载了 ${data.users.length} 个用户`);
-    return data.users;
-  } catch (error) {
-    console.log('⚠️ 无法加载 following-list.json，使用默认用户列表');
+  const users = config.followingUsers || [];
+  if (users.length === 0) {
+    console.log('⚠️ 未配置 FOLLOWING_USERS，使用 DEFAULT_USERS（仅用于兼容旧脚本）');
     return DEFAULT_USERS;
   }
+  console.log(`📋 从 FOLLOWING_USERS 加载了 ${users.length} 个用户`);
+  return users.map(u => String(u).replace(/^@/, '')).filter(Boolean);
 }
 
 const DEFAULT_USERS = [

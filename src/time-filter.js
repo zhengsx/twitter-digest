@@ -4,6 +4,8 @@
  * 解析 Jina 返回的时间字符串，过滤只保留最近 24 小时的推文
  */
 
+import { extractTimestamp } from './snowflake.js';
+
 /**
  * 解析推文时间字符串
  * 
@@ -91,10 +93,14 @@ export function isWithinHours(tweetDate, hoursAgo = 24, now = new Date()) {
  * @param {Array} tweets - 推文数组
  * @param {number} hoursAgo - 保留多少小时内的推文（默认 24）
  * @param {Date} fetchedAt - 抓取时间
+ * @param {Object} context - 可选上下文
+ * @param {string} context.username - 当前用户（用于日志）
+ * @param {Function} context.logger - 日志函数（默认 console.log）
  * @returns {Object} { filtered: 过滤后的推文, stats: 统计信息 }
  */
-export function filterRecentTweets(tweets, hoursAgo = 24, fetchedAt = new Date()) {
+export function filterRecentTweets(tweets, hoursAgo = 24, fetchedAt = new Date(), context = {}) {
   const now = new Date();
+  const logger = typeof context?.logger === 'function' ? context.logger : console.log;
   const stats = {
     total: tweets.length,
     kept: 0,
@@ -105,12 +111,31 @@ export function filterRecentTweets(tweets, hoursAgo = 24, fetchedAt = new Date()
   };
   
   const filtered = tweets.filter(tweet => {
-    const tweetDate = parseTweetTime(tweet.time, fetchedAt);
-    
+    const username = tweet?.username || context?.username || 'unknown';
+    const urlStatusId = tweet?.url?.match(/\/status\/(\d+)/)?.[1] || null;
+    const candidateId = tweet?.tweetId || urlStatusId || null;
+
+    // Hard timestamp (Snowflake) wins when available.
+    let tweetDate = null;
+    let timeSource = null;
+    const snowflakeTs = candidateId ? extractTimestamp(candidateId) : null;
+    if (snowflakeTs !== null) {
+      tweetDate = new Date(snowflakeTs);
+      timeSource = 'snowflake';
+      // Normalize tweetId when it only exists in URL.
+      if (!tweet.tweetId && candidateId) tweet.tweetId = String(candidateId);
+    } else {
+      tweetDate = parseTweetTime(tweet.time, fetchedAt);
+      timeSource = 'time_str';
+    }
+
     if (!tweetDate) {
       stats.unparseable++;
-      // 无法解析时间的推文，保守起见保留
-      return true;
+      stats.filtered++;
+      logger(
+        `🧹 过滤推文 @${username} time=${tweet?.time || 'unknown'} reason=unparseable_time url=${tweet?.url || 'unknown'}`
+      );
+      return false; // 无法解析时间 -> 默认丢弃
     }
     
     // 附加解析后的时间到推文对象
@@ -130,6 +155,9 @@ export function filterRecentTweets(tweets, hoursAgo = 24, fetchedAt = new Date()
     }
     
     stats.filtered++;
+    logger(
+      `🧹 过滤推文 @${username} time=${tweet?.time || 'unknown'} parsed=${tweetDate.toISOString()} source=${timeSource} reason=older_than_${hoursAgo}h url=${tweet?.url || 'unknown'}`
+    );
     return false;
   });
   

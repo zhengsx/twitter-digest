@@ -1,6 +1,7 @@
 import fetch from 'node-fetch';
 import { config } from './config.js';
 import { filterRecentTweets, formatTimeAgo, parseTweetTime } from './time-filter.js';
+import { extractTimestamp } from './snowflake.js';
 
 /**
  * 使用 Jina Reader API 获取用户时间线
@@ -167,6 +168,8 @@ function parseTweetSection(section, timeStr, tweetUrl, currentUser) {
   const normalizedUrl = tweetId
     ? `https://x.com/${currentUser}/status/${tweetId}`
     : tweetUrl;
+  const snowflakeMs = tweetId ? extractTimestamp(tweetId) : null;
+  const snowflakeTime = snowflakeMs !== null ? new Date(snowflakeMs) : null;
 
   // 移除链接和图片标记
   let text = section
@@ -216,10 +219,12 @@ function parseTweetSection(section, timeStr, tweetUrl, currentUser) {
   const originalText = cleanText;
 
   return {
+    username: currentUser,
     text: cleanText.slice(0, 500),
     originalText,
     url: normalizedUrl,
     tweetId,
+    snowflakeTime,
     time: timeStr,
     likes: 0,
     retweets: 0,
@@ -274,6 +279,8 @@ function extractTweetFromParagraph(paragraph, currentUser) {
   const normalizedUrl = tweetId
     ? `https://x.com/${urlUsername}/status/${tweetId}`
     : null;
+  const snowflakeMs = tweetId ? extractTimestamp(tweetId) : null;
+  const snowflakeTime = snowflakeMs !== null ? new Date(snowflakeMs) : null;
 
   // 检测是否是转推
   const isRetweet = /^.*reposted$/im.test(text) || /^RT @/i.test(text);
@@ -300,10 +307,12 @@ function extractTweetFromParagraph(paragraph, currentUser) {
   const originalText = cleanText;
 
   return {
+    username: currentUser,
     text: cleanText.slice(0, 500),
     originalText,
     url: normalizedUrl,
     tweetId,
+    snowflakeTime,
     likes,
     retweets,
     replies,
@@ -387,9 +396,12 @@ export async function fetchAllUserTimelines(usernames, options = {}) {
         continue;
       }
       
-      // 应用时间过滤
-      if (filterTime) {
-        const { filtered, stats } = filterRecentTweets(data.tweets, hoursAgo, fetchedAt);
+      // 应用时间过滤（强制启用：避免旧推文混入日报）
+      if (filterTime === false) {
+        console.log(`⚠️  fetchAllUserTimelines(): filterTime=false 已废弃，仍会强制过滤旧推文`);
+      }
+      {
+        const { filtered, stats } = filterRecentTweets(data.tweets, hoursAgo, fetchedAt, { username });
         
         totalFiltered += stats.filtered;
         totalKept += stats.kept;
@@ -407,10 +419,6 @@ export async function fetchAllUserTimelines(usernames, options = {}) {
           usersWithNoRecent.push(username);
           console.log(`   ⏭ @${username}: 无近 ${hoursAgo}h 推文 (共 ${stats.total} 条旧推文)`);
         }
-      } else {
-        // 不过滤时间
-        allData.push(data);
-        console.log(`   ✓ @${username}: ${data.tweets.length} 条推文`);
       }
     } catch (error) {
       console.log(`   ✗ @${username}: 失败 - ${error.message}`);
@@ -421,13 +429,11 @@ export async function fetchAllUserTimelines(usernames, options = {}) {
   }
   
   // 汇总统计
-  if (filterTime) {
-    console.log(`\n📊 时间过滤统计:`);
-    console.log(`   ✓ 保留: ${totalKept} 条 (${hoursAgo}h 内)`);
-    console.log(`   ✗ 过滤: ${totalFiltered} 条 (旧推文)`);
-    if (usersWithNoRecent.length > 0) {
-      console.log(`   ⏭ 无新内容用户: ${usersWithNoRecent.length} 个`);
-    }
+  console.log(`\n📊 时间过滤统计:`);
+  console.log(`   ✓ 保留: ${totalKept} 条 (${hoursAgo}h 内)`);
+  console.log(`   ✗ 过滤: ${totalFiltered} 条 (旧推文/无法解析时间)`);
+  if (usersWithNoRecent.length > 0) {
+    console.log(`   ⏭ 无新内容用户: ${usersWithNoRecent.length} 个`);
   }
   
   return allData;
