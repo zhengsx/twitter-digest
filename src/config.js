@@ -10,7 +10,7 @@ export const config = {
     url: process.env.LIST_FEED_URL || 'https://x.com/i/lists/2019940021005058347',
     cdpHost: process.env.LIST_FEED_CDP_HOST || '127.0.0.1',
     cdpPort: Number(process.env.LIST_FEED_CDP_PORT || 18800),
-    scrollCount: Number(process.env.LIST_FEED_SCROLL_COUNT || 30),
+    scrollCount: Number(process.env.LIST_FEED_SCROLL_COUNT || 40),
     scrollDelay: Number(process.env.LIST_FEED_SCROLL_DELAY || 2000),
     scrollAmount: Number(process.env.LIST_FEED_SCROLL_AMOUNT || 2000),
     pageLoadDelay: Number(process.env.LIST_FEED_PAGE_LOAD_DELAY || 8000),
@@ -27,7 +27,7 @@ export const config = {
   },
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY,
-    model: 'google/gemini-3-pro-preview',
+    model: process.env.OPENROUTER_MODEL || 'anthropic/claude-opus-4.6',
   },
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN,

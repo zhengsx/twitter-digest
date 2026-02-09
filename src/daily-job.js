@@ -94,7 +94,7 @@ async function main() {
   console.log(`💾 原始数据已保存: ${dataPath}\n`);
   
   // 5. 生成报告
-  console.log('🤖 正在用 Gemini 3 Pro 生成报告...\n');
+  console.log(`🤖 正在用 ${config.openrouter.model} 生成报告...\n`);
   const report = await generateReport(tweetsData, new Date());
   
   // 6. 保存报告

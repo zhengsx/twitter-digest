@@ -2,7 +2,7 @@ import fetch from 'node-fetch';
 import { config } from './config.js';
 
 /**
- * 用 Gemini 3 Pro 生成报告
+ * 用 OpenRouter API 生成报告（默认 Claude Opus 4.6）
  */
 export async function generateReport(tweetsData, date) {
   const dateStr = date.toISOString().split('T')[0];
