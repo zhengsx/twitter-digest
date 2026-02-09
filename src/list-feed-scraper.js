@@ -261,6 +261,12 @@ export async function scrapeListFeed() {
         15000
       );
       await sleep(scrollDelay);
+      // Log progress every 10 scrolls
+      if ((i + 1) % 10 === 0) {
+        const midRes = await cdp.send('Runtime.evaluate', { expression: 'Object.keys(window.__allTweets || {}).length', returnByValue: true }, 10000);
+        const midCount = midRes?.result?.value ?? '?';
+        console.log(`[list-feed] Scroll ${i + 1}/${scrollCount}: ${midCount} tweets so far`);
+      }
     }
 
     // Final extract + read results.

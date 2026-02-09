@@ -10,10 +10,10 @@ export const config = {
     url: process.env.LIST_FEED_URL || 'https://x.com/i/lists/2019940021005058347',
     cdpHost: process.env.LIST_FEED_CDP_HOST || '127.0.0.1',
     cdpPort: Number(process.env.LIST_FEED_CDP_PORT || 18800),
-    scrollCount: Number(process.env.LIST_FEED_SCROLL_COUNT || 20),
-    scrollDelay: Number(process.env.LIST_FEED_SCROLL_DELAY || 1500),
+    scrollCount: Number(process.env.LIST_FEED_SCROLL_COUNT || 30),
+    scrollDelay: Number(process.env.LIST_FEED_SCROLL_DELAY || 2000),
     scrollAmount: Number(process.env.LIST_FEED_SCROLL_AMOUNT || 2000),
-    pageLoadDelay: Number(process.env.LIST_FEED_PAGE_LOAD_DELAY || 5000),
+    pageLoadDelay: Number(process.env.LIST_FEED_PAGE_LOAD_DELAY || 8000),
     // Additional safety for slow loads; scraper will still wait pageLoadDelay afterwards.
     pageLoadTimeoutMs: Number(process.env.LIST_FEED_PAGE_LOAD_TIMEOUT_MS || 30000),
   },
