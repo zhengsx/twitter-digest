@@ -5,8 +5,8 @@
   "main": "src/daily-job.js",
   "type": "module",
   "scripts": {
-    "start": "node src/daily-job.js",
-    "daily": "node src/daily-job.js",
+    "start": "node --max-old-space-size=1024 src/daily-job.js",
+    "daily": "node --max-old-space-size=1024 src/daily-job.js",
     "test": "node src/test-jina.js"
   },
   "dependencies": {

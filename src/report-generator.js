@@ -9,33 +9,18 @@ export async function generateReport(tweetsData, date) {
   
   // 整理数据
   const summary = tweetsData.map(d => {
-    const originalTweets = d.tweets.filter(t => !t.isReply && !t.isRetweet);
-    const replies = d.tweets.filter(t => t.isReply);
-    const retweets = d.tweets.filter(t => t.isRetweet);
-    
     return {
-      user: `@${d.user.username} (${d.user.name})`,
-      followers: d.user.followers,
-      stats: {
-        total: d.tweets.length,
-        original: originalTweets.length,
-        replies: replies.length,
-        retweets: retweets.length,
-      },
-      topTweets: originalTweets
-        .sort((a, b) => (b.likes + b.retweets) - (a.likes + a.retweets))
-        .slice(0, 5)
+      user: `@${d.user.username}`,
+      // 传所有推文给模型，不做截断筛选
+      allTweets: d.tweets
         .map(t => ({
-          text: t.text.slice(0, 280),
-          likes: t.likes,
-          retweets: t.retweets,
+          text: (t.text || '').slice(0, 300),
           url: buildTweetUrl(d.user.username, t),
-          tweetId: t.tweetId || null,
         })),
     };
   });
   
-  const prompt = `作为资深科技行业分析师，请根据以下 Twitter 信源的今日动态生成一份简洁有洞察的日报。
+  const prompt = `你是一位科技行业信息聚合分析师。请根据以下 Twitter 信源的今日动态生成一份**周全、完整**的日报。
 
 日期：${dateStr}
 信源数量：${tweetsData.length} 个账号
@@ -43,30 +28,61 @@ export async function generateReport(tweetsData, date) {
 数据：
 ${JSON.stringify(summary, null, 2)}
 
-要求：
-1. 提炼今日最重要的 3-5 个话题/趋势
-2. 标注关键人物的重要发言
-3. 如有行业热点事件，简要分析
-4. 语言简洁，重点突出
-5. 用中文输出`;
+## 核心原则（必须遵守！）
+- **不要自行判断信息是否重要进行筛选！** 你的任务是信息的聚合和排序，不是筛选
+- **每一条有实质内容的推文都必须出现在报告中**，不能遗漏
+- 所谓"无实质内容"仅指纯表情、"Yes"、"Cool"、"True" 等单词回复
+- 只要推文包含具体信息（产品名、公司名、技术概念、数据、观点），就必须收录
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.openrouter.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.openrouter.model,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 4000,
-    }),
-  });
+## 报告结构
+1. **🔥 今日要点**（5-10 条，按重要性排序）
+   - 每条包含：标题、涉及人物、核心内容摘要、原文链接
+   
+2. **👤 各信源动态**（按信源分组，覆盖所有有推文的信源）
+   - 每个信源的每条推文都要简要提及
+   - 包含原文精选和链接
+
+3. **📊 统计** — 信源数、推文数
+
+## 其他要求
+- 用中文输出
+- 保留所有技术细节（模型名、参数、benchmark 数据等）
+- 保留所有人名、公司名、项目名
+- 链接必须保留`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000); // 3 分钟超时
   
-  const data = await response.json();
+  let response;
+  try {
+    response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.openrouter.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.openrouter.model,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 16000,
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+  
+  const rawText = await response.text();
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch (e) {
+    console.error('API response parse error. Raw length:', rawText.length, 'First 500 chars:', rawText.slice(0, 500));
+    throw new Error(`API response is not valid JSON (${rawText.length} bytes)`);
+  }
   
   if (data.error) {
-    throw new Error(`Gemini API 错误: ${data.error.message}`);
+    throw new Error(`API 错误: ${data.error.message}`);
   }
   
   const report = data.choices[0].message.content + buildTweetListSection(tweetsData);
