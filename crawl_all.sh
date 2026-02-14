@@ -4,7 +4,7 @@ cd ~/Documents/Projects/twitter-digest
 OUTDIR="data/2026-02-07-v2"
 mkdir -p "$OUTDIR"
 
-JINA_KEY="jina_422c9ce559de4c519e827233cdcd90a0E22LcYJzishlFevVhkXkuuHXS_0G"
+JINA_KEY="jina_b6b8d30b500e4683b0f3e027941eacd8kMxiBUGdzcuDUzRAVYut6p0fEg7I"
 
 USERS=(LiorOnAI cjpedregal steph_palazzolo gdb indigox borgeaud_s dwarkesh_sp _The_Prophet__ gregisenberg omarsar0 onechancefreedm akshay_pachaar dair_ai rasbt chetaslua Thom_Wolf soumithchintala mattshumer_ emollick michaeljburry JeffDean EpochAIResearch METR_Evals sama elonmusk DarioAmodei karpathy demishassabis ylecun ilyasut danielgross jhyuxm Trinkle23897 NoamBrown markchen90 tom_brown Jasonwei20 lilianweng dpkingma AmandaAskell jackclarkSF janleike alexalbert__ OriolVinyals NandoDF hausman_k danijarh Quoc_Le RemiLeblond DrJimFan chelseafinn tri_dao percyliang hardmaru arankomatsuzaki seb_ruder swyx goodside hwchase17 mark_riedl RichardSocher SebastienBubeck npew MostafaRohani jacobaustin132 AlexTamkin FelixHill84 jackrae_ natfriedman _albertgu fchollet AndrewYNg GaryMarcus aidangomez arthurmensch sea_snell TonyZZhao alexwei_ SherylHsu02 andresnds caseychu9 joannejang josh_tobin_ billpeeb cmikeh2 rohanjamin _tim_brooks model_mechanic bcherny The_Whole_Daisy _catwu sammcallister Linatawfik9 YangsiboHuang vyraun xiao_ted xiaoyiz_uw)
 

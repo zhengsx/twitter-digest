@@ -8,7 +8,7 @@ const dataDir = path.join(__dirname, '..', 'data');
 const followingPath = path.join(dataDir, 'following.json');
 
 const DEFAULT_USERNAME = 'xxcc48764';
-const JINA_API_KEY = 'jina_422c9ce559de4c519e827233cdcd90a0E22LcYJzishlFevVhkXkuuHXS_0G';
+const JINA_API_KEY = 'jina_b6b8d30b500e4683b0f3e027941eacd8kMxiBUGdzcuDUzRAVYut6p0fEg7I';
 
 function extractUsernames(markdown, ownerUsername) {
   if (!markdown) return [];

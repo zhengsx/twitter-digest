@@ -23,7 +23,7 @@ const FILTER_HOURS = 24; // 只保留最近 24 小时的推文
 const USE_TWEET_ID_MODE = true;
 
 // 配置
-const JINA_API_KEY = 'jina_422c9ce559de4c519e827233cdcd90a0E22LcYJzishlFevVhkXkuuHXS_0G';
+const JINA_API_KEY = 'jina_b6b8d30b500e4683b0f3e027941eacd8kMxiBUGdzcuDUzRAVYut6p0fEg7I';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 
 // 用户列表 - 只从配置读取（避免 following-list.json 过时数据导致信源数量不对）
