@@ -209,7 +209,7 @@ function buildGovHtml(govReport, tweetsData) {
       text-align: right;
     }
     .others-section {
-      margin-top: 14px;
+      margin-top: 30px;
       margin-bottom: 0;
       padding-bottom: 0;
     }
@@ -248,11 +248,11 @@ function buildGovHtml(govReport, tweetsData) {
       margin-left: 6px;
     }
     .footer-bar {
-      margin-top: 14px;
-      padding-top: 8px;
-      border-top: 1px solid #e2e8f0;
+      margin-top: 24px;
+      padding-top: 12px;
+      border-top: 2px solid #e2e8f0;
       text-align: center;
-      font-size: 11px;
+      font-size: 22px;
       color: #a0aec0;
       /* 确保 footer 不会推出新页 */
       margin-bottom: 0;
