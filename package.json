@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node --max-old-space-size=1024 src/daily-job.js",
     "daily": "node --max-old-space-size=1024 src/daily-job.js",
-    "test": "node src/test-jina.js"
+    "test": "node src/test-jina.js",
+    "pdf": "node src/html-pdf-generator.js"
   },
   "dependencies": {
     "dotenv": "^16.0.0",
