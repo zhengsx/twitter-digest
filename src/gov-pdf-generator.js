@@ -3,9 +3,10 @@ import path from 'path';
 import { config } from './config.js';
 
 /**
- * 政府版 PDF 生成器 v4
+ * 政府版 PDF 生成器 v5
  * 紧凑布局：卡片自适应高度，连续排列，无强制分页
  * 修复：消除页尾空白、最后空白页、第一页空白问题
+ * v5: 水平边距移到 HTML body padding，兼容微信 PDF 阅读器
  * 支持图片智能筛选（useImage 字段控制）
  */
 
@@ -85,7 +86,7 @@ function buildGovHtml(govReport, tweetsData) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI 科技动态精华简报 - ${date}</title>
   <style>
-    /* v4: 去掉 @page margin，由 printToPDF 参数控制 */
+    /* v5: @page margin:0, 水平边距由 body padding 控制 */
     @page {
       size: 100mm 180mm;
       margin: 0;
@@ -102,7 +103,8 @@ function buildGovHtml(govReport, tweetsData) {
       /* 防止最后空白页 */
       height: auto !important;
       margin: 0 !important;
-      padding: 0 !important;
+      /* 水平 padding 内嵌到 HTML，微信 PDF 阅读器不吃 printToPDF margin */
+      padding: 0 24px !important;
     }
     .header {
       background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
@@ -351,8 +353,8 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
     await new Promise(r => setTimeout(r, 5000));
 
     // Print to PDF
-    // v4: preferCSSPageSize: true 让 @page margin:0 生效，
-    // 由 printToPDF 的 margin 参数统一控制页边距
+    // v5: 水平边距由 HTML body padding 控制（微信 PDF 阅读器兼容）
+    // marginLeft/marginRight 设为 0，避免微信忽略 printToPDF margin 导致贴边
     const pdfResult = await cdpSend('Page.printToPDF', {
       landscape: false,
       displayHeaderFooter: false,
@@ -362,8 +364,8 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
       paperHeight: 7.09,  // 180mm - mobile height (9:16ish)
       marginTop: 0.24,
       marginBottom: 0.24,
-      marginLeft: 0.31,
-      marginRight: 0.31,
+      marginLeft: 0,
+      marginRight: 0,
     });
 
     const pdfBuffer = Buffer.from(pdfResult.data, 'base64');
@@ -383,7 +385,7 @@ async function main() {
   const dataPath = path.join(config.paths.data, `tweets-${today}.json`);
   const outputPath = path.join(config.paths.reports, `gov-daily-${today}.pdf`);
 
-  console.log(`🖨️  政府版 PDF 生成器 v4`);
+  console.log(`🖨️  政府版 PDF 生成器 v5`);
   console.log(`📅 日期: ${today}`);
   console.log(`📂 精华报告: ${reportPath}`);
   console.log(`📂 原始数据: ${dataPath}\n`);
