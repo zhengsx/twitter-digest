@@ -4,6 +4,8 @@ import { config } from './config.js';
 import { scrapeListFeed } from './list-feed-scraper.js';
 import { generateReport } from './report-generator.js';
 import { sendTelegramMessage } from './telegram-notifier.js';
+import { generateGovReport } from './gov-report-generator.js';
+import { generateGovPdf } from './gov-pdf-generator.js';
 
 const DATA_DIR = config.paths.data;
 const REPORTS_DIR = config.paths.reports;
@@ -65,6 +67,7 @@ async function main() {
       retweets: 0,
       isReply: false,
       isRetweet: false,
+      images: Array.isArray(t.images) ? t.images : [],
     };
 
     const arr = byAuthor.get(username) || [];
@@ -122,7 +125,22 @@ ${report.report}`;
   
   await sendTelegramMessage(telegramMsg);
   
-  console.log('✅ 日报生成完成!');
+  // 8. 生成政府版精华简报
+  console.log(`\n📋 正在生成政府版精华简报...\n`);
+  try {
+    const govReport = await generateGovReport(tweetsData, new Date());
+    const govReportPath = path.join(REPORTS_DIR, `gov-report-${today}.json`);
+    await fs.writeFile(govReportPath, JSON.stringify(govReport, null, 2));
+    console.log(`📄 政府版精华 JSON: ${govReportPath}`);
+
+    const govPdfPath = path.join(REPORTS_DIR, `gov-daily-${today}.pdf`);
+    await generateGovPdf(govReport, tweetsData, govPdfPath);
+    console.log(`📄 政府版 PDF: ${govPdfPath}`);
+  } catch (err) {
+    console.error('⚠️ 政府版生成失败（不影响日常版）:', err.message);
+  }
+
+  console.log('\n✅ 日报生成完成!');
 }
 
 main().catch(err => {

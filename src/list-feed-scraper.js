@@ -170,13 +170,31 @@ const EXTRACT_TWEETS_JS = `
           else if (href.startsWith('/')) tweetUrl = 'https://x.com' + href;
         }
 
+        // Extract images
+        const images = [];
+        const photoImgs = art.querySelectorAll('[data-testid="tweetPhoto"] img');
+        for (const img of photoImgs) {
+          let src = img.src || '';
+          if (src && src.includes('pbs.twimg.com')) {
+            src = src.replace(/name=\\w+/, 'name=large');
+            if (!src.includes('name=')) src += '?name=large';
+            images.push(src);
+          }
+        }
+        const videoEls = art.querySelectorAll('[data-testid="videoPlayer"] video');
+        for (const vid of videoEls) {
+          const poster = vid.poster || '';
+          if (poster) images.push(poster);
+        }
+
         const key = tweetUrl || (datetime + '|' + text.substring(0, 50));
         if (!window.__allTweets[key]) {
           window.__allTweets[key] = {
             author,
             text: (text || '').substring(0, 800),
             datetime,
-            tweetUrl
+            tweetUrl,
+            images
           };
         }
       } catch (e) {}
