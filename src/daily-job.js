@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { scrapeListFeed } from './list-feed-scraper.js';
 import { generateReport } from './report-generator.js';
 import { sendTelegramMessage } from './telegram-notifier.js';
+import { generateDailyPdf } from './html-pdf-generator.js';
 import { generateGovReport } from './gov-report-generator.js';
 import { generateGovPdf } from './gov-pdf-generator.js';
 
@@ -48,7 +49,7 @@ async function main() {
   }
 
   // 3. 按 author 分组，整理为 generateReport() 需要的结构
-  const byAuthor = new Map(); // username -> tweets[]
+  const byAuthor = new Map();
   for (const t of recent) {
     const author = (t.author || '').trim();
     if (!author) continue;
@@ -100,7 +101,7 @@ async function main() {
   console.log(`🤖 正在用 ${config.openrouter.model} 生成报告...\n`);
   const report = await generateReport(tweetsData, new Date());
   
-  // 6. 保存报告
+  // 6. 保存报告 MD
   const reportPath = path.join(REPORTS_DIR, `report-${today}.md`);
   const reportContent = `# Twitter 信源日报 - ${today}
 
@@ -113,8 +114,18 @@ ${report.report}
   
   await fs.writeFile(reportPath, reportContent);
   console.log(`📄 报告已保存: ${reportPath}\n`);
+
+  // 7. 日常版 PDF（MD → HTML → CDP printToPDF）
+  console.log(`📰 正在生成日常版 PDF...\n`);
+  try {
+    const dailyPdfPath = path.join(REPORTS_DIR, `twitter-daily-${today}.pdf`);
+    await generateDailyPdf(reportPath, dailyPdfPath, today);
+    console.log(`📄 日常版 PDF: ${dailyPdfPath}`);
+  } catch (err) {
+    console.error('⚠️ 日常版 PDF 生成失败（不影响其他步骤）:', err.message);
+  }
   
-  // 7. 发送 Telegram 通知
+  // 8. 发送 Telegram 通知
   const telegramMsg = `📰 *Twitter 信源日报 - ${today}*
 
 _${report.sourcesCount} 个信源 | ${report.totalTweets} 条推文_
@@ -125,7 +136,7 @@ ${report.report}`;
   
   await sendTelegramMessage(telegramMsg);
   
-  // 8. 生成政府版精华简报
+  // 9. 生成政府版精华简报
   console.log(`\n📋 正在生成政府版精华简报...\n`);
   try {
     const govReport = await generateGovReport(tweetsData, new Date());
