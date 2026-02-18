@@ -3,8 +3,9 @@ import path from 'path';
 import { config } from './config.js';
 
 /**
- * 政府版 PDF 生成器 v3
+ * 政府版 PDF 生成器 v4
  * 紧凑布局：卡片自适应高度，连续排列，无强制分页
+ * 修复：消除页尾空白、最后空白页、第一页空白问题
  * 支持图片智能筛选（useImage 字段控制）
  */
 
@@ -27,10 +28,8 @@ function buildGovHtml(govReport, tweetsData) {
   }
 
   const cardsHtml = highlights.map((item, idx) => {
-    // Only show images if useImage is true (or if useImage is not set, for backward compat)
     const showImages = item.useImage !== false;
     const images = showImages ? (imageMap.get(item.url) || []) : [];
-    // Filter to only pbs.twimg.com/media/ images (real tweet images, not thumbnails/avatars)
     const filteredImages = images.filter(src =>
       src.includes('pbs.twimg.com/media/') ||
       src.includes('pbs.twimg.com/ext_tw_video_thumb/')
@@ -38,7 +37,7 @@ function buildGovHtml(govReport, tweetsData) {
 
     const imagesHtml = filteredImages.length > 0
       ? `<div class="card-images">${filteredImages.slice(0, 2).map(src =>
-          `<img src="${src}" style="max-width:100%;max-height:280px;border-radius:6px;margin:6px 0;object-fit:contain;" onerror="this.style.display='none'" />`
+          `<img src="${src}" style="max-width:100%;max-height:240px;border-radius:6px;margin:4px 0;object-fit:contain;" onerror="this.style.display='none'" />`
         ).join('\n')}${item.imageNote ? `<div class="image-note">${item.imageNote}</div>` : ''}</div>`
       : '';
 
@@ -67,7 +66,7 @@ function buildGovHtml(govReport, tweetsData) {
       <div class="other-item">
         <span class="other-title">${o.title}</span>
         <span class="other-brief">${o.brief || ''}</span>
-        <span class="other-source">${o.source || ''}</span>
+        <span class="other-source">${o.source || ''}${o.url ? ` · <a href="${o.url}" style="color:#2b6cb0;">${o.url}</a>` : ''}</span>
       </div>
     `).join('\n');
 
@@ -86,100 +85,117 @@ function buildGovHtml(govReport, tweetsData) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI 科技动态精华简报 - ${date}</title>
   <style>
+    /* v4: 去掉 @page margin，由 printToPDF 参数控制 */
     @page {
       size: A4;
-      margin: 20mm 15mm;
+      margin: 0;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
+    html, body {
       font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
       background: #ffffff;
       color: #2d3748;
-      font-size: 14px;
-      line-height: 1.6;
+      font-size: 36px;
+      line-height: 1.8;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
+      /* 防止最后空白页 */
+      height: auto !important;
+      margin: 0 !important;
+      padding: 0 !important;
     }
     .header {
       background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
       color: white;
-      padding: 16px 32px;
+      padding: 28px 40px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      border-radius: 8px;
-      margin-bottom: 16px;
+      border-radius: 12px;
+      margin-bottom: 24px;
     }
     .header-title {
-      font-size: 18px;
+      font-size: 42px;
       font-weight: 600;
-      letter-spacing: 2px;
+      letter-spacing: 3px;
     }
     .header-date {
-      font-size: 14px;
+      font-size: 32px;
       opacity: 0.85;
     }
     .section-title {
-      font-size: 14px;
+      font-size: 32px;
       color: #718096;
       letter-spacing: 3px;
-      margin-bottom: 14px;
-      padding-bottom: 8px;
-      border-bottom: 2px solid #e2e8f0;
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 3px solid #e2e8f0;
     }
     .card {
-      padding: 14px 0;
-      border-bottom: 1px solid #e2e8f0;
+      padding: 20px 0;
+      border-bottom: 2px solid #e2e8f0;
       position: relative;
+      /* 允许在卡片内分页，防止大卡片把前页留空 */
+      page-break-inside: auto;
+      break-inside: auto;
     }
     .card:last-of-type {
       border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
     }
     .card-header {
       display: flex;
       align-items: center;
-      gap: 10px;
-      margin-bottom: 6px;
+      gap: 16px;
+      margin-bottom: 10px;
+      /* 标题行不要跟内容分开 */
+      page-break-after: avoid;
+      break-after: avoid;
     }
     .card-number {
-      font-size: 24px;
+      font-size: 48px;
       font-weight: 700;
       color: #cbd5e0;
       line-height: 1;
     }
     .card-importance {
       display: inline-block;
-      font-size: 11px;
+      font-size: 24px;
       font-weight: 600;
-      padding: 1px 6px;
-      border-radius: 3px;
+      padding: 4px 12px;
+      border-radius: 6px;
     }
     .card-importance.high { background: #fed7d7; color: #c53030; }
     .card-importance.medium { background: #fefcbf; color: #975a16; }
     .card-title {
-      font-size: 17px;
+      font-size: 40px;
       font-weight: 700;
       color: #1a365d;
       line-height: 1.4;
-      margin-bottom: 6px;
+      margin-bottom: 12px;
+      page-break-after: avoid;
+      break-after: avoid;
     }
     .card-images {
-      margin: 8px 0;
+      margin: 16px 0;
+      page-break-inside: auto;
+      break-inside: auto;
     }
     .image-note {
-      font-size: 12px;
+      font-size: 26px;
       color: #718096;
       font-style: italic;
-      margin-top: 4px;
+      margin-top: 6px;
     }
     .card-summary {
-      font-size: 14px;
-      line-height: 1.7;
+      font-size: 36px;
+      line-height: 1.8;
       color: #2d3748;
-      margin-bottom: 8px;
+      margin-bottom: 16px;
     }
     .card-meta {
-      font-size: 12px;
+      font-size: 26px;
       color: #718096;
       display: flex;
       justify-content: space-between;
@@ -193,23 +209,30 @@ function buildGovHtml(govReport, tweetsData) {
       text-align: right;
     }
     .others-section {
-      margin-top: 20px;
+      margin-top: 14px;
+      margin-bottom: 0;
+      padding-bottom: 0;
     }
     .others-divider {
-      border-top: 2px solid #e2e8f0;
-      margin-bottom: 12px;
+      border-top: 3px solid #e2e8f0;
+      margin-bottom: 16px;
     }
     .others-title {
-      font-size: 16px;
+      font-size: 36px;
       font-weight: 600;
       color: #2d3748;
-      margin-bottom: 10px;
+      margin-bottom: 14px;
     }
     .other-item {
-      padding: 5px 0;
+      padding: 10px 0;
       border-bottom: 1px solid #edf2f7;
-      font-size: 13px;
-      line-height: 1.5;
+      font-size: 30px;
+      line-height: 1.7;
+    }
+    .other-item:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
     }
     .other-title {
       font-weight: 600;
@@ -221,16 +244,26 @@ function buildGovHtml(govReport, tweetsData) {
     }
     .other-source {
       color: #a0aec0;
-      font-size: 12px;
+      font-size: 24px;
       margin-left: 6px;
     }
     .footer-bar {
-      margin-top: 20px;
-      padding-top: 10px;
+      margin-top: 14px;
+      padding-top: 8px;
       border-top: 1px solid #e2e8f0;
       text-align: center;
       font-size: 11px;
       color: #a0aec0;
+      /* 确保 footer 不会推出新页 */
+      margin-bottom: 0;
+      padding-bottom: 0;
+      page-break-before: avoid;
+      break-before: avoid;
+    }
+    /* 防止最后元素产生空白页 */
+    body > *:last-child {
+      margin-bottom: 0 !important;
+      padding-bottom: 0 !important;
     }
   </style>
 </head>
@@ -317,12 +350,14 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
     // Wait for load + images
     await new Promise(r => setTimeout(r, 5000));
 
-    // Print to PDF - use page margins instead of CSS @page
+    // Print to PDF
+    // v4: preferCSSPageSize: true 让 @page margin:0 生效，
+    // 由 printToPDF 的 margin 参数统一控制页边距
     const pdfResult = await cdpSend('Page.printToPDF', {
       landscape: false,
       displayHeaderFooter: false,
       printBackground: true,
-      preferCSSPageSize: false,
+      preferCSSPageSize: true,
       paperWidth: 8.27,   // A4
       paperHeight: 11.69,  // A4
       marginTop: 0.4,
@@ -348,7 +383,7 @@ async function main() {
   const dataPath = path.join(config.paths.data, `tweets-${today}.json`);
   const outputPath = path.join(config.paths.reports, `gov-daily-${today}.pdf`);
 
-  console.log(`🖨️  政府版 PDF 生成器 v3`);
+  console.log(`🖨️  政府版 PDF 生成器 v4`);
   console.log(`📅 日期: ${today}`);
   console.log(`📂 精华报告: ${reportPath}`);
   console.log(`📂 原始数据: ${dataPath}\n`);
