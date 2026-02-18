@@ -87,7 +87,7 @@ function buildGovHtml(govReport, tweetsData) {
   <style>
     /* v4: 去掉 @page margin，由 printToPDF 参数控制 */
     @page {
-      size: A4;
+      size: 100mm 180mm;
       margin: 0;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -95,7 +95,7 @@ function buildGovHtml(govReport, tweetsData) {
       font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
       background: #ffffff;
       color: #2d3748;
-      font-size: 36px;
+      font-size: 24px;
       line-height: 1.8;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
@@ -107,29 +107,29 @@ function buildGovHtml(govReport, tweetsData) {
     .header {
       background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
       color: white;
-      padding: 28px 40px;
+      padding: 16px 20px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      border-radius: 12px;
-      margin-bottom: 24px;
+      border-radius: 8px;
+      margin-bottom: 16px;
     }
     .header-title {
-      font-size: 42px;
+      font-size: 26px;
       font-weight: 600;
-      letter-spacing: 3px;
+      letter-spacing: 2px;
     }
     .header-date {
-      font-size: 32px;
+      font-size: 20px;
       opacity: 0.85;
     }
     .section-title {
-      font-size: 32px;
+      font-size: 22px;
       color: #718096;
-      letter-spacing: 3px;
-      margin-bottom: 20px;
-      padding-bottom: 10px;
-      border-bottom: 3px solid #e2e8f0;
+      letter-spacing: 2px;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid #e2e8f0;
     }
     .card {
       padding: 20px 0;
@@ -154,26 +154,26 @@ function buildGovHtml(govReport, tweetsData) {
       break-after: avoid;
     }
     .card-number {
-      font-size: 48px;
+      font-size: 32px;
       font-weight: 700;
       color: #cbd5e0;
       line-height: 1;
     }
     .card-importance {
       display: inline-block;
-      font-size: 24px;
+      font-size: 16px;
       font-weight: 600;
-      padding: 4px 12px;
-      border-radius: 6px;
+      padding: 3px 8px;
+      border-radius: 4px;
     }
     .card-importance.high { background: #fed7d7; color: #c53030; }
     .card-importance.medium { background: #fefcbf; color: #975a16; }
     .card-title {
-      font-size: 40px;
+      font-size: 26px;
       font-weight: 700;
       color: #1a365d;
       line-height: 1.4;
-      margin-bottom: 12px;
+      margin-bottom: 8px;
       page-break-after: avoid;
       break-after: avoid;
     }
@@ -183,19 +183,19 @@ function buildGovHtml(govReport, tweetsData) {
       break-inside: auto;
     }
     .image-note {
-      font-size: 26px;
+      font-size: 16px;
       color: #718096;
       font-style: italic;
       margin-top: 6px;
     }
     .card-summary {
-      font-size: 36px;
+      font-size: 24px;
       line-height: 1.8;
       color: #2d3748;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
     }
     .card-meta {
-      font-size: 26px;
+      font-size: 18px;
       color: #718096;
       display: flex;
       justify-content: space-between;
@@ -218,15 +218,15 @@ function buildGovHtml(govReport, tweetsData) {
       margin-bottom: 16px;
     }
     .others-title {
-      font-size: 36px;
+      font-size: 24px;
       font-weight: 600;
       color: #2d3748;
-      margin-bottom: 14px;
+      margin-bottom: 10px;
     }
     .other-item {
-      padding: 10px 0;
+      padding: 8px 0;
       border-bottom: 1px solid #edf2f7;
-      font-size: 30px;
+      font-size: 20px;
       line-height: 1.7;
     }
     .other-item:last-child {
@@ -244,15 +244,15 @@ function buildGovHtml(govReport, tweetsData) {
     }
     .other-source {
       color: #a0aec0;
-      font-size: 24px;
+      font-size: 16px;
       margin-left: 6px;
     }
     .footer-bar {
-      margin-top: 24px;
-      padding-top: 12px;
-      border-top: 2px solid #e2e8f0;
+      margin-top: 16px;
+      padding-top: 8px;
+      border-top: 1px solid #e2e8f0;
       text-align: center;
-      font-size: 22px;
+      font-size: 14px;
       color: #a0aec0;
       /* 确保 footer 不会推出新页 */
       margin-bottom: 0;
@@ -357,13 +357,13 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
       landscape: false,
       displayHeaderFooter: false,
       printBackground: true,
-      preferCSSPageSize: true,
-      paperWidth: 8.27,   // A4
-      paperHeight: 11.69,  // A4
-      marginTop: 0.8,
-      marginBottom: 0.6,
-      marginLeft: 1.57,
-      marginRight: 1.57,
+      preferCSSPageSize: false,
+      paperWidth: 3.94,   // 100mm - mobile width
+      paperHeight: 7.09,  // 180mm - mobile height (9:16ish)
+      marginTop: 0.24,
+      marginBottom: 0.24,
+      marginLeft: 0.31,
+      marginRight: 0.31,
     });
 
     const pdfBuffer = Buffer.from(pdfResult.data, 'base64');
