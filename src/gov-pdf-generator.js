@@ -360,10 +360,10 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
       preferCSSPageSize: true,
       paperWidth: 8.27,   // A4
       paperHeight: 11.69,  // A4
-      marginTop: 0.4,
-      marginBottom: 0.4,
-      marginLeft: 0.4,
-      marginRight: 0.4,
+      marginTop: 0.6,
+      marginBottom: 0.5,
+      marginLeft: 0.8,
+      marginRight: 0.8,
     });
 
     const pdfBuffer = Buffer.from(pdfResult.data, 'base64');
