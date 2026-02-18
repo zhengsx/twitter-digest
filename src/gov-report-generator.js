@@ -20,7 +20,7 @@ export async function generateGovReport(tweetsData, date) {
     })),
   }));
 
-  const prompt = `你是一位面向政府领导的科技情报分析师。请从以下 Twitter 信源中精选 3-5 条最重要的 AI/科技动态，生成精华简报。
+    const prompt = `你是一位面向政府领导的科技情报分析师。请从以下 Twitter 信源中分析 AI/科技动态，生成精华简报。
 
 日期：${dateStr}
 
@@ -28,26 +28,35 @@ export async function generateGovReport(tweetsData, date) {
 ${JSON.stringify(summary, null, 2)}
 
 ## 要求
-1. 只选 AI、科技、重大产品发布相关的内容（忽略政治、社会议论等）
-2. 每条用中文撰写，通俗易懂，让不懂技术的领导也能看懂
-3. 标题简洁有力，一句话概括
-4. 摘要 2-3 句，简明扼要说清楚：是什么、为什么重要
-5. 按重要性排序
+1. 精选 3-5 条最重要的作为"要点"（highlights），每条带 3-5 句详细摘要
+2. 额外输出 5-10 条"其他动态"（others），每条只需一句话标题+一句话摘要
+3. 只选 AI、科技、重大产品发布相关的内容（忽略政治、社会议论等）
+4. 每条用中文撰写，通俗易懂，让不懂技术的领导也能看懂
+5. 标题简洁有力，一句话概括
+6. 按重要性排序
 
 ## 输出格式
 严格输出 JSON，不要有任何多余文字：
 {
   "date": "${dateStr}",
-  "items": [
+  "highlights": [
     {
       "title": "一句话标题",
-      "summary": "3-5句核心内容摘要",
+      "summary": "3-5句核心内容摘要，详细说明是什么、为什么重要",
       "source": "@handle",
       "url": "https://x.com/...",
       "importance": "high 或 medium"
     }
+  ],
+  "others": [
+    {
+      "title": "一句话标题",
+      "brief": "一句话简短摘要",
+      "source": "@handle",
+      "url": "https://x.com/..."
+    }
   ]
-}`;
+}`
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120000);
@@ -135,11 +144,14 @@ async function main() {
   await fs.mkdir(config.paths.reports, { recursive: true });
   await fs.writeFile(outPath, JSON.stringify(govReport, null, 2));
   console.log(`✅ 精华报告已保存: ${outPath}`);
-  console.log(`📊 精选条目: ${govReport.items.length} 条\n`);
+  console.log(`📊 要点: ${(govReport.highlights||[]).length} 条, 其他: ${(govReport.others||[]).length} 条\n`);
 
-  for (const item of govReport.items) {
-    console.log(`  [${item.importance}] ${item.title}`);
+  for (const item of (govReport.highlights || [])) {
+    console.log(`  [要点] ${item.title}`);
     console.log(`    ${item.source} - ${item.url}\n`);
+  }
+  for (const item of (govReport.others || [])) {
+    console.log(`  [其他] ${item.title}`);
   }
 }
 

@@ -3,19 +3,20 @@ import path from 'path';
 import { config } from './config.js';
 
 /**
- * 政府版 PDF 生成器
- * 读取精华版 JSON → 生成 HTML → 通过 CDP 导出 PDF
+ * 政府版 PDF 生成器 v2
+ * 无封面页，直接显示内容，支持图片和附录
  */
 
 function buildGovHtml(govReport, tweetsData) {
   const date = govReport.date || new Date().toISOString().split('T')[0];
-  const items = govReport.items || [];
+  const highlights = govReport.highlights || govReport.items || [];
+  const others = govReport.others || [];
 
   // Build image lookup: url -> images[]
   const imageMap = new Map();
   if (tweetsData) {
     for (const userData of tweetsData) {
-      for (const tweet of userData.tweets) {
+      for (const tweet of (userData.tweets || [])) {
         const url = tweet.url || '';
         if (url && Array.isArray(tweet.images) && tweet.images.length > 0) {
           imageMap.set(url, tweet.images);
@@ -24,27 +25,48 @@ function buildGovHtml(govReport, tweetsData) {
     }
   }
 
-  const cardsHtml = items.map((item, idx) => {
+  const cardsHtml = highlights.map((item, idx) => {
     const images = imageMap.get(item.url) || [];
     const imagesHtml = images.length > 0
-      ? images.map(src =>
-          `<img src="${src}" style="width:100%;border-radius:8px;margin:12px 0;" />`
-        ).join('\n')
+      ? `<div class="card-images">${images.map(src =>
+          `<img src="${src}" style="width:100%;border-radius:8px;margin:8px 0;" onerror="this.style.display='none'" />`
+        ).join('\n')}</div>`
       : '';
 
     return `
     <div class="card">
       <div class="card-number">${String(idx + 1).padStart(2, '0')}</div>
-      <div class="card-importance ${item.importance}">${item.importance === 'high' ? '🔴 重要' : '🟡 关注'}</div>
+      <div class="card-importance ${item.importance || 'medium'}">${
+        item.importance === 'high' ? '🔴 重要' : '🟡 关注'
+      }</div>
       <h2 class="card-title">${item.title}</h2>
       ${imagesHtml}
       <p class="card-summary">${item.summary}</p>
       <div class="card-meta">
         <span class="card-source">${item.source}</span>
-        <span class="card-link">${item.url}</span>
+        <span class="card-link">${item.url || ''}</span>
       </div>
     </div>`;
   }).join('\n');
+
+  // Others appendix
+  let othersHtml = '';
+  if (others.length > 0) {
+    const otherItems = others.map(o => `
+      <div class="other-item">
+        <span class="other-title">${o.title}</span>
+        <span class="other-brief">${o.brief || ''}</span>
+        <span class="other-source">${o.source || ''}</span>
+      </div>
+    `).join('\n');
+
+    othersHtml = `
+    <div class="others-section">
+      <div class="others-divider"></div>
+      <div class="others-title">📎 其他值得关注的动态</div>
+      ${otherItems}
+    </div>`;
+  }
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -65,99 +87,79 @@ function buildGovHtml(govReport, tweetsData) {
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
-    .cover {
-      width: 100%;
-      min-height: 100vh;
-      background: linear-gradient(135deg, #1a365d 0%, #2c5282 50%, #2b6cb0 100%);
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
+    .header {
+      background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
       color: white;
-      text-align: center;
-      padding: 60px 40px;
-      page-break-after: always;
+      padding: 20px 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
-    .cover-icon { font-size: 72px; margin-bottom: 30px; }
-    .cover-title {
-      font-size: 42px;
-      font-weight: 700;
-      letter-spacing: 4px;
-      margin-bottom: 16px;
-      line-height: 1.4;
-    }
-    .cover-subtitle {
-      font-size: 22px;
-      opacity: 0.85;
-      margin-bottom: 40px;
-      font-weight: 300;
-    }
-    .cover-date {
-      font-size: 28px;
-      font-weight: 500;
-      border-top: 2px solid rgba(255,255,255,0.3);
-      padding-top: 24px;
+    .header-title {
+      font-size: 20px;
+      font-weight: 600;
       letter-spacing: 2px;
     }
-    .cover-footer {
-      margin-top: 60px;
+    .header-date {
       font-size: 16px;
-      opacity: 0.6;
+      opacity: 0.85;
     }
-    .content { padding: 40px 48px; }
+    .content { padding: 30px 48px; }
     .section-title {
-      font-size: 18px;
+      font-size: 16px;
       color: #718096;
-      text-transform: uppercase;
       letter-spacing: 3px;
-      margin-bottom: 30px;
-      padding-bottom: 12px;
+      margin-bottom: 24px;
+      padding-bottom: 10px;
       border-bottom: 2px solid #e2e8f0;
     }
     .card {
       background: #f7fafc;
       border-radius: 12px;
-      padding: 28px 32px;
-      margin-bottom: 24px;
+      padding: 24px 28px;
+      margin-bottom: 20px;
       border-left: 4px solid #2b6cb0;
       position: relative;
       page-break-inside: avoid;
     }
     .card-number {
       position: absolute;
-      top: 20px;
-      right: 24px;
-      font-size: 48px;
+      top: 16px;
+      right: 20px;
+      font-size: 42px;
       font-weight: 700;
       color: #e2e8f0;
       line-height: 1;
     }
     .card-importance {
       display: inline-block;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
-      padding: 3px 10px;
+      padding: 2px 8px;
       border-radius: 4px;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
     .card-importance.high { background: #fed7d7; color: #c53030; }
     .card-importance.medium { background: #fefcbf; color: #975a16; }
     .card-title {
-      font-size: 24px;
+      font-size: 22px;
       font-weight: 700;
       color: #1a365d;
       line-height: 1.5;
-      margin-bottom: 14px;
-      padding-right: 60px;
+      margin-bottom: 12px;
+      padding-right: 50px;
+    }
+    .card-images {
+      margin: 10px 0;
     }
     .card-summary {
-      font-size: 17px;
+      font-size: 16px;
       line-height: 1.8;
       color: #2d3748;
-      margin-bottom: 16px;
+      margin-bottom: 14px;
     }
     .card-meta {
-      font-size: 14px;
+      font-size: 13px;
       color: #718096;
       display: flex;
       justify-content: space-between;
@@ -170,27 +172,58 @@ function buildGovHtml(govReport, tweetsData) {
       max-width: 70%;
       text-align: right;
     }
+    .others-section {
+      margin-top: 36px;
+      page-break-inside: avoid;
+    }
+    .others-divider {
+      border-top: 2px solid #e2e8f0;
+      margin-bottom: 16px;
+    }
+    .others-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #2d3748;
+      margin-bottom: 16px;
+    }
+    .other-item {
+      padding: 8px 0;
+      border-bottom: 1px solid #edf2f7;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+    .other-title {
+      font-weight: 600;
+      color: #1a365d;
+    }
+    .other-brief {
+      color: #4a5568;
+      margin-left: 8px;
+    }
+    .other-source {
+      color: #a0aec0;
+      font-size: 13px;
+      margin-left: 8px;
+    }
     .footer-bar {
-      margin-top: 40px;
-      padding-top: 20px;
+      margin-top: 30px;
+      padding-top: 16px;
       border-top: 1px solid #e2e8f0;
       text-align: center;
-      font-size: 13px;
+      font-size: 12px;
       color: #a0aec0;
     }
   </style>
 </head>
 <body>
-  <div class="cover">
-    <div class="cover-icon">🤖</div>
-    <div class="cover-title">AI 科技动态<br/>精华简报</div>
-    <div class="cover-subtitle">Tech Intelligence Brief</div>
-    <div class="cover-date">${date}</div>
-    <div class="cover-footer">基于 Twitter 信源 · AI 自动生成</div>
+  <div class="header">
+    <div class="header-title">🤖 AI 科技动态精华简报</div>
+    <div class="header-date">${date}</div>
   </div>
   <div class="content">
-    <div class="section-title">今日精选 · ${items.length} 条动态</div>
+    <div class="section-title">今日精选 · ${highlights.length} 条要点</div>
     ${cardsHtml}
+    ${othersHtml}
     <div class="footer-bar">
       本简报由 AI 自动分析 Twitter 信源生成 · ${date}
     </div>
@@ -207,7 +240,7 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
   await fs.writeFile(htmlPath, html, 'utf-8');
   console.log(`📄 HTML 已生成: ${htmlPath}`);
 
-  // Use CDP to export PDF (similar to existing pattern)
+  // Use CDP to export PDF
   const WebSocket = (await import('ws')).default;
   const nodeFetch = (await import('node-fetch')).default;
 
@@ -264,8 +297,8 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
     const fileUrl = `file://${path.resolve(htmlPath)}`;
     await cdpSend('Page.navigate', { url: fileUrl });
 
-    // Wait for load
-    await new Promise(r => setTimeout(r, 3000));
+    // Wait for load + images
+    await new Promise(r => setTimeout(r, 5000));
 
     // Print to PDF
     const pdfResult = await cdpSend('Page.printToPDF', {
@@ -298,7 +331,7 @@ async function main() {
   const dataPath = path.join(config.paths.data, `tweets-${today}.json`);
   const outputPath = path.join(config.paths.reports, `gov-daily-${today}.pdf`);
 
-  console.log(`🖨️  政府版 PDF 生成器`);
+  console.log(`🖨️  政府版 PDF 生成器 v2`);
   console.log(`📅 日期: ${today}`);
   console.log(`📂 精华报告: ${reportPath}`);
   console.log(`📂 原始数据: ${dataPath}\n`);

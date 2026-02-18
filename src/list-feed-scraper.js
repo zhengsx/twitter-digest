@@ -304,7 +304,8 @@ export async function scrapeListFeed() {
       const key = tweetUrl || `${author}|${datetime}|${text.slice(0, 50)}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ author, text, datetime, tweetUrl });
+      const images = Array.isArray(t.images) ? t.images : [];
+      out.push({ author, text, datetime, tweetUrl, images });
     }
 
     console.log(`[list-feed] Extracted tweets: ${out.length}`);
