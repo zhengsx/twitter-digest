@@ -403,7 +403,11 @@ async function main() {
   await generateGovPdf(govReport, tweetsData, outputPath);
 }
 
-main().catch(err => {
-  console.error('❌ 执行失败:', err);
-  process.exit(1);
-});
+// Only run main() when executed directly, not when imported
+const isDirectRun = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/.*\//, ''));
+if (isDirectRun) {
+  main().catch(err => {
+    console.error('❌ 执行失败:', err);
+    process.exit(1);
+  });
+}
