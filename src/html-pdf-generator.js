@@ -22,7 +22,7 @@ const md = markdownit({ html: true, linkify: true, typographer: true });
 
 const CSS = `
 body {
-  font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
   max-width: 100%;
   margin: 0;
   padding: 20px;

@@ -93,7 +93,7 @@ function buildGovHtml(govReport, tweetsData) {
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
-      font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
       background: #ffffff;
       color: #2d3748;
       font-size: 24px;

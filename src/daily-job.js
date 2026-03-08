@@ -11,12 +11,70 @@ import { generateGovPdf } from './gov-pdf-generator.js';
 const DATA_DIR = config.paths.data;
 const REPORTS_DIR = config.paths.reports;
 
+const CDP_URL = `http://${config.listFeed.cdpHost}:${config.listFeed.cdpPort}/json/version`;
+const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const CHROME_ARGS = [
+  `--remote-debugging-port=${config.listFeed.cdpPort}`,
+  '--user-data-dir=/tmp/chrome-cdp-profile',
+  '--headless=new',
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--disable-gpu',
+];
+
+async function isCdpReady() {
+  try {
+    const resp = await fetch(CDP_URL, { signal: AbortSignal.timeout(3000) });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForCdp(maxWaitMs = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (await isCdpReady()) return true;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return false;
+}
+
+async function ensureCdpRunning() {
+  if (await isCdpReady()) {
+    console.log('✅ CDP 端口已就绪');
+    return;
+  }
+
+  console.log('⚠️ CDP 端口不可达，尝试启动 Chrome...');
+  const { spawn } = await import('child_process');
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    console.log(`🔄 第 ${attempt} 次尝试启动 Chrome...`);
+    const child = spawn(CHROME_PATH, CHROME_ARGS, {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+
+    if (await waitForCdp(15000)) {
+      console.log('✅ Chrome CDP 启动成功');
+      return;
+    }
+    console.log(`⚠️ 第 ${attempt} 次等待超时`);
+  }
+
+  throw new Error('❌ 无法启动 Chrome CDP，两次尝试均失败');
+}
+
 async function ensureDirs() {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.mkdir(REPORTS_DIR, { recursive: true });
 }
 
 async function main() {
+  await ensureCdpRunning();
+
   console.log('🚀 Twitter Digest 日报生成开始 (List feed CDP)\n');
   console.log(`📅 日期: ${new Date().toISOString().split('T')[0]}`);
   console.log(`🧭 List: ${config.listFeed.url}`);
