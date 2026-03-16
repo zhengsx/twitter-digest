@@ -194,19 +194,24 @@ ${report.report}`;
   
   await sendTelegramMessage(telegramMsg);
   
-  // 9. 生成政府版精华简报
-  console.log(`\n📋 正在生成政府版精华简报...\n`);
-  try {
-    const govReport = await generateGovReport(tweetsData, new Date());
-    const govReportPath = path.join(REPORTS_DIR, `gov-report-${today}.json`);
-    await fs.writeFile(govReportPath, JSON.stringify(govReport, null, 2));
-    console.log(`📄 政府版精华 JSON: ${govReportPath}`);
+  // 9. 生成政府版精华简报（默认跳过，传 --gov 或 ENABLE_GOV=1 时启用）
+  const enableGov = process.argv.includes('--gov') || process.env.ENABLE_GOV === '1';
+  if (enableGov) {
+    console.log(`\n📋 正在生成政府版精华简报...\n`);
+    try {
+      const govReport = await generateGovReport(tweetsData, new Date());
+      const govReportPath = path.join(REPORTS_DIR, `gov-report-${today}.json`);
+      await fs.writeFile(govReportPath, JSON.stringify(govReport, null, 2));
+      console.log(`📄 政府版精华 JSON: ${govReportPath}`);
 
-    const govPdfPath = path.join(REPORTS_DIR, `gov-daily-${today}.pdf`);
-    await generateGovPdf(govReport, tweetsData, govPdfPath);
-    console.log(`📄 政府版 PDF: ${govPdfPath}`);
-  } catch (err) {
-    console.error('⚠️ 政府版生成失败（不影响日常版）:', err.message);
+      const govPdfPath = path.join(REPORTS_DIR, `gov-daily-${today}.pdf`);
+      await generateGovPdf(govReport, tweetsData, govPdfPath);
+      console.log(`📄 政府版 PDF: ${govPdfPath}`);
+    } catch (err) {
+      console.error('⚠️ 政府版生成失败（不影响日常版）:', err.message);
+    }
+  } else {
+    console.log(`\n⏭️ 政府版已跳过（传 --gov 或 ENABLE_GOV=1 启用）`);
   }
 
   console.log('\n✅ 日报生成完成!');
