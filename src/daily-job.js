@@ -7,6 +7,7 @@ import { sendTelegramMessage } from './telegram-notifier.js';
 import { generateDailyPdf } from './html-pdf-generator.js';
 import { generateGovReport } from './gov-report-generator.js';
 import { generateGovPdf } from './gov-pdf-generator.js';
+import { fetchYouTubePodcasts } from './youtube-fetcher.js';
 
 const DATA_DIR = config.paths.data;
 const REPORTS_DIR = config.paths.reports;
@@ -155,15 +156,25 @@ async function main() {
   await fs.writeFile(dataPath, JSON.stringify(tweetsData, null, 2));
   console.log(`💾 原始数据已保存: ${dataPath}\n`);
   
-  // 5. 生成报告
+  // 5. 获取 YouTube 播客更新（错误不阻塞主流程）
+  console.log('📺 获取 YouTube 播客更新...\n');
+  let youtubePodcasts = [];
+  try {
+    youtubePodcasts = await fetchYouTubePodcasts(config.youtube?.podcasts || []);
+  } catch (err) {
+    console.warn('⚠️ YouTube 播客获取失败（不影响日报生成）:', err.message);
+  }
+
+  // 6. 生成报告
   console.log(`🤖 正在用 ${config.openrouter.model} 生成报告...\n`);
-  const report = await generateReport(tweetsData, new Date());
+  const report = await generateReport(tweetsData, new Date(), youtubePodcasts);
   
-  // 6. 保存报告 MD
+  // 7. 保存报告 MD
   const reportPath = path.join(REPORTS_DIR, `report-${today}.md`);
+  const youtubeStats = report.totalYoutubeVideos > 0 ? ` | 播客更新: ${report.totalYoutubeVideos}` : '';
   const reportContent = `# Twitter 信源日报 - ${today}
 
-> 信源数: ${report.sourcesCount} | 推文数: ${report.totalTweets} | 生成时间: ${report.generatedAt}
+> 信源数: ${report.sourcesCount} | 推文数: ${report.totalTweets}${youtubeStats} | 生成时间: ${report.generatedAt}
 
 ---
 
@@ -184,9 +195,10 @@ ${report.report}
   }
   
   // 8. 发送 Telegram 通知
+  const youtubeStatsLine = report.totalYoutubeVideos > 0 ? ` | 📺 播客 ${report.totalYoutubeVideos} 集` : '';
   const telegramMsg = `📰 *Twitter 信源日报 - ${today}*
 
-_${report.sourcesCount} 个信源 | ${report.totalTweets} 条推文_
+_${report.sourcesCount} 个信源 | ${report.totalTweets} 条推文${youtubeStatsLine}_
 
 ---
 

@@ -36,5 +36,35 @@ export const config = {
   paths: {
     data: './data',
     reports: './reports',
-  }
+  },
+  // YouTube 播客信源（follow-builders 整合）
+  youtube: {
+    podcasts: [
+      {
+        name: 'Latent Space',
+        handle: '@LatentSpacePod',
+        channelId: 'UCxBcwypKK-W3GHd_RZ9FZrQ',
+      },
+      {
+        name: 'Training Data',
+        handle: '@TrainingDataPod',
+        playlistId: 'PLOhHNjZItNnMm5tdW61JpnyxeYH5NDDx8',
+      },
+      {
+        name: 'No Priors',
+        handle: '@NoPriorsPodcast',
+        channelId: 'UCSI7h9hydQ40K5MJHnCrQvw',
+      },
+      {
+        name: 'Unsupervised Learning',
+        handle: '@RedpointAI',
+        channelId: 'UCUl-s_Vp-Kkk_XVyDylNwLA',
+      },
+      {
+        name: 'The MAD Podcast (Data Driven NYC)',
+        handle: '@DataDrivenNYC',
+        channelId: 'UCQID78IY6EOojr5RUdD47MQ',
+      },
+    ],
+  },
 };

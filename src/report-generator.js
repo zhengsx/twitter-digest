@@ -3,8 +3,11 @@ import { config } from './config.js';
 
 /**
  * 用 OpenRouter API 生成报告（默认 Claude Opus 4.6）
+ * @param {Array} tweetsData - 推文数据
+ * @param {Date} date - 日期
+ * @param {Array} [youtubePodcasts] - YouTube 播客更新（可选）
  */
-export async function generateReport(tweetsData, date) {
+export async function generateReport(tweetsData, date, youtubePodcasts = []) {
   const dateStr = date.toISOString().split('T')[0];
   
   // 整理数据
@@ -20,13 +23,30 @@ export async function generateReport(tweetsData, date) {
     };
   });
   
+  // 构建 YouTube 播客章节（如果有更新）
+  const youtubeSectionText = youtubePodcasts && youtubePodcasts.length > 0
+    ? `\n\nYouTube 播客今日更新：\n${JSON.stringify(
+        youtubePodcasts.map(({ podcast, videos }) => ({
+          podcast: podcast.name,
+          handle: podcast.handle,
+          newVideos: videos.map(v => ({
+            title: v.title,
+            url: v.url,
+            published: v.published,
+            description: v.description,
+          })),
+        })),
+        null, 2
+      )}`
+    : '';
+
   const prompt = `你是一位科技行业信息聚合分析师。请根据以下 Twitter 信源的今日动态生成一份**周全、完整**的日报。
 
 日期：${dateStr}
 信源数量：${tweetsData.length} 个账号
 
 数据：
-${JSON.stringify(summary, null, 2)}
+${JSON.stringify(summary, null, 2)}${youtubeSectionText}
 
 ## 核心原则（必须遵守！）
 - **不要自行判断信息是否重要进行筛选！** 你的任务是信息的聚合和排序，不是筛选
@@ -41,8 +61,12 @@ ${JSON.stringify(summary, null, 2)}
 2. **👤 各信源动态**（按信源分组，覆盖所有有推文的信源）
    - 每个信源的每条推文都要简要提及
    - 包含原文精选和链接
-
-3. **📊 统计** — 信源数、推文数
+${youtubePodcasts && youtubePodcasts.length > 0 ? `
+3. **📺 播客更新**（YouTube 播客新节目）
+   - 列出每个有更新的播客频道及新集标题、链接
+   - 简要概述节目主题（根据标题和描述推断）
+` : ''}
+4. **📊 统计** — 信源数、推文数${youtubePodcasts && youtubePodcasts.length > 0 ? '、播客更新数' : ''}
 
 ## 其他要求
 - 用中文输出
@@ -85,15 +109,37 @@ ${JSON.stringify(summary, null, 2)}
     throw new Error(`API 错误: ${data.error.message}`);
   }
   
-  const report = data.choices[0].message.content + buildTweetListSection(tweetsData);
+  const youtubeSection = buildYoutubePodcastSection(youtubePodcasts);
+  const report = data.choices[0].message.content + buildTweetListSection(tweetsData) + youtubeSection;
+
+  const totalYoutubeVideos = youtubePodcasts.reduce((s, r) => s + r.videos.length, 0);
 
   return {
     date: dateStr,
     report,
     sourcesCount: tweetsData.length,
     totalTweets: tweetsData.reduce((sum, d) => sum + d.tweets.length, 0),
+    totalYoutubeVideos,
     generatedAt: new Date().toISOString(),
   };
+}
+
+function buildYoutubePodcastSection(youtubePodcasts) {
+  if (!youtubePodcasts || youtubePodcasts.length === 0) return '';
+
+  const lines = ['\n\n【YouTube 播客更新列表】'];
+  for (const { podcast, videos } of youtubePodcasts) {
+    if (!videos || videos.length === 0) continue;
+    lines.push(`\n频道：${podcast.name} (${podcast.handle})`);
+    for (const v of videos) {
+      lines.push(`标题：${v.title}`);
+      lines.push(`链接：${v.url}`);
+      if (v.published) lines.push(`发布时间：${v.published}`);
+      if (v.description) lines.push(`简介：${v.description}`);
+      lines.push('');
+    }
+  }
+  return lines.join('\n');
 }
 
 function buildTweetListSection(tweetsData) {
