@@ -15,6 +15,7 @@
 import fs from 'fs';
 import fsP from 'fs/promises';
 import path from 'path';
+import http from 'http';
 import markdownit from 'markdown-it';
 import { config } from './config.js';
 
@@ -140,9 +141,12 @@ export async function generateDailyPdf(inputMdPath, outputPdfPath, dateStr) {
 
   const host = config.listFeed.cdpHost || '127.0.0.1';
   const port = Number(config.listFeed.cdpPort || 18800);
+  const RELAY_PORT = 18792;
+  const RELAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+  const tokenParam = port === RELAY_PORT ? `?token=${RELAY_TOKEN}` : '';
 
   // Get page target
-  const listRes = await nodeFetch(`http://${host}:${port}/json/list`);
+  const listRes = await nodeFetch(`http://${host}:${port}/json/list${tokenParam}`);
   const targets = await listRes.json();
   const pageTarget = targets.find(
     t => t.type === 'page' && t.webSocketDebuggerUrl
@@ -151,7 +155,12 @@ export async function generateDailyPdf(inputMdPath, outputPdfPath, dateStr) {
     throw new Error('No CDP page target found');
   }
 
-  const ws = new WebSocket(pageTarget.webSocketDebuggerUrl, {
+  let wsUrl = pageTarget.webSocketDebuggerUrl;
+  if (port === RELAY_PORT && RELAY_TOKEN && !wsUrl.includes('token=')) {
+    wsUrl += (wsUrl.includes('?') ? '&' : '?') + `token=${RELAY_TOKEN}`;
+  }
+
+  const ws = new WebSocket(wsUrl, {
     handshakeTimeout: 10000,
   });
   await new Promise((resolve, reject) => {
@@ -188,11 +197,33 @@ export async function generateDailyPdf(inputMdPath, outputPdfPath, dateStr) {
     });
   }
 
+  // Start a temporary HTTP server to serve the HTML file
+  // (Chrome Relay does not allow file:// URLs)
+  const htmlDir = path.dirname(path.resolve(htmlPath));
+  const htmlFile = path.basename(htmlPath);
+  const srv = http.createServer((req, res) => {
+    const filePath = path.join(htmlDir, decodeURIComponent(req.url.split('?')[0]).slice(1));
+    if (!filePath.startsWith(htmlDir)) { res.writeHead(403); res.end(); return; }
+    fs.readFile(filePath, (err, data) => {
+      if (err) { res.writeHead(404); res.end(); return; }
+      const ext = path.extname(filePath).toLowerCase();
+      const mime = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.png': 'image/png', '.jpg': 'image/jpeg' }[ext] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` });
+      res.end(data);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    srv.listen(0, '127.0.0.1', () => resolve());
+    srv.once('error', reject);
+  });
+  const srvPort = srv.address().port;
+  const httpUrl = `http://127.0.0.1:${srvPort}/${htmlFile}`;
+  console.log(`🌐 临时 HTTP server 启动: port ${srvPort}`);
+
   try {
     await cdpSend('Page.enable');
 
-    const fileUrl = `file://${path.resolve(htmlPath)}`;
-    await cdpSend('Page.navigate', { url: fileUrl });
+    await cdpSend('Page.navigate', { url: httpUrl });
 
     // Wait for page load
     await new Promise(r => setTimeout(r, 3000));
@@ -220,6 +251,7 @@ export async function generateDailyPdf(inputMdPath, outputPdfPath, dateStr) {
     return outputPdfPath;
   } finally {
     ws.close(1000, 'done');
+    srv.close();
   }
 }
 
