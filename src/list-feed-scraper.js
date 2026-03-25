@@ -109,7 +109,10 @@ class CdpClient {
 }
 
 async function getPageTargetWsUrl({ host, port }) {
-  const url = `http://${host}:${port}/json/list`;
+  const RELAY_PORT = 18792;
+  const RELAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+  const tokenParam = port === RELAY_PORT ? `?token=${RELAY_TOKEN}` : '';
+  const url = `http://${host}:${port}/json/list${tokenParam}`;
   const res = await withTimeout(fetch(url), 5000, `GET ${url}`);
   if (!res.ok) {
     throw new Error(`Failed to query CDP targets: HTTP ${res.status} ${res.statusText}`);
@@ -129,7 +132,12 @@ async function getPageTargetWsUrl({ host, port }) {
     pageTargets.find(t => !t.url || t.url === 'about:blank' || t.url.startsWith('chrome://')) ||
     pageTargets[0];
 
-  return preferred.webSocketDebuggerUrl;
+  let wsUrl = preferred.webSocketDebuggerUrl;
+  // Relay WebSocket 也需要 token 认证
+  if (port === RELAY_PORT && RELAY_TOKEN && !wsUrl.includes('token=')) {
+    wsUrl += (wsUrl.includes('?') ? '&' : '?') + `token=${RELAY_TOKEN}`;
+  }
+  return wsUrl;
 }
 
 const EXTRACT_TWEETS_JS = `
@@ -217,14 +225,14 @@ const GET_TWEETS_JS = `
  * CDP-based X List feed scraper.
  * Returns: Array<{author, text, datetime, tweetUrl}>
  */
-export async function scrapeListFeed() {
+export async function scrapeListFeed(overrideCdpPort) {
   const cfg = config.listFeed;
   if (!cfg || !cfg.url) {
     throw new Error('Missing config.listFeed.url (set LIST_FEED_URL)');
   }
 
   const host = cfg.cdpHost || '127.0.0.1';
-  const port = Number(cfg.cdpPort || 18800);
+  const port = overrideCdpPort != null ? Number(overrideCdpPort) : Number(cfg.cdpPort || 18800);
 
   console.log(`[list-feed] CDP target: ${host}:${port}`);
   console.log(`[list-feed] URL: ${cfg.url}`);

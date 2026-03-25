@@ -12,60 +12,95 @@ import { fetchYouTubePodcasts } from './youtube-fetcher.js';
 const DATA_DIR = config.paths.data;
 const REPORTS_DIR = config.paths.reports;
 
-const CDP_URL = `http://${config.listFeed.cdpHost}:${config.listFeed.cdpPort}/json/version`;
-const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const CHROME_ARGS = [
-  `--remote-debugging-port=${config.listFeed.cdpPort}`,
-  '--user-data-dir=/tmp/chrome-cdp-profile',
-  '--headless=new',
-  '--no-first-run',
-  '--no-default-browser-check',
-  '--disable-gpu',
-];
+// ⚠️ 安全优先：Relay 使用真实浏览器指纹，封号风险远低于 headless
+// Headless 仅作备选，且操作速度要更慢（headless 模式下滚动间隔 ×1.5）
+const RELAY_PORT = 18792;
+const HEADLESS_PORT = 18800;
+const CDP_HOST = config.listFeed.cdpHost;
 
-async function isCdpReady() {
+const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+
+function buildHeadlessArgs(port) {
+  return [
+    `--remote-debugging-port=${port}`,
+    '--user-data-dir=/tmp/chrome-cdp-profile',
+    '--headless=new',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-gpu',
+  ];
+}
+
+const RELAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+
+async function tryConnect(port) {
   try {
-    const resp = await fetch(CDP_URL, { signal: AbortSignal.timeout(3000) });
+    const tokenParam = port === RELAY_PORT ? `?token=${RELAY_TOKEN}` : '';
+    const url = `http://${CDP_HOST}:${port}/json/version${tokenParam}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(3000) });
     return resp.ok;
   } catch {
     return false;
   }
 }
 
-async function waitForCdp(maxWaitMs = 15000) {
+async function waitForCdp(port, maxWaitMs = 15000) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
-    if (await isCdpReady()) return true;
+    if (await tryConnect(port)) return true;
     await new Promise(r => setTimeout(r, 1000));
   }
   return false;
 }
 
-async function ensureCdpRunning() {
-  if (await isCdpReady()) {
-    console.log('✅ CDP 端口已就绪');
-    return;
-  }
-
-  console.log('⚠️ CDP 端口不可达，尝试启动 Chrome...');
+async function launchHeadless() {
   const { spawn } = await import('child_process');
-
   for (let attempt = 1; attempt <= 2; attempt++) {
-    console.log(`🔄 第 ${attempt} 次尝试启动 Chrome...`);
-    const child = spawn(CHROME_PATH, CHROME_ARGS, {
+    console.log(`🔄 第 ${attempt} 次尝试启动 headless Chrome (${HEADLESS_PORT})...`);
+    const child = spawn(CHROME_PATH, buildHeadlessArgs(HEADLESS_PORT), {
       detached: true,
       stdio: 'ignore',
     });
     child.unref();
-
-    if (await waitForCdp(15000)) {
-      console.log('✅ Chrome CDP 启动成功');
+    if (await waitForCdp(HEADLESS_PORT, 15000)) {
       return;
     }
     console.log(`⚠️ 第 ${attempt} 次等待超时`);
   }
+  throw new Error('❌ 无法启动 headless Chrome，两次尝试均失败');
+}
 
-  throw new Error('❌ 无法启动 Chrome CDP，两次尝试均失败');
+/**
+ * 确保 CDP 可用，优先使用 Chrome Relay (18792)，回退 headless (18800)。
+ * 返回实际使用的端口号。
+ */
+async function ensureCdpRunning() {
+  // 1. 先试 relay (18792)
+  if (await tryConnect(RELAY_PORT)) {
+    console.log('✅ Chrome Relay 连接成功 (18792)');
+    return RELAY_PORT;
+  }
+  console.warn('⚠️ Relay 不可达，回退到 headless CDP (18800)');
+
+  // 2. 再试 headless (18800)
+  if (await tryConnect(HEADLESS_PORT)) {
+    console.log('✅ Headless CDP 连接成功 (18800)');
+    return HEADLESS_PORT;
+  }
+
+  // 3. 尝试启动 headless
+  await launchHeadless();
+  if (await tryConnect(HEADLESS_PORT)) {
+    console.log('✅ Headless CDP 启动并连接成功 (18800)');
+    return HEADLESS_PORT;
+  }
+
+  // 最后尝试：通知 sx
+  console.error('❌ Relay 和 Headless 均不可达。请确保：');
+  console.error('   1. Chrome 已打开');
+  console.error('   2. OpenClaw Browser Relay 扩展已 attach 一个 tab');
+  console.error('   3. 或者 headless Chrome 正在运行');
+  throw new Error('❌ Relay 和 Headless 均不可达，请检查 Chrome 状态');
 }
 
 async function ensureDirs() {
@@ -74,18 +109,18 @@ async function ensureDirs() {
 }
 
 async function main() {
-  await ensureCdpRunning();
+  const activeCdpPort = await ensureCdpRunning();
 
   console.log('🚀 Twitter Digest 日报生成开始 (List feed CDP)\n');
   console.log(`📅 日期: ${new Date().toISOString().split('T')[0]}`);
   console.log(`🧭 List: ${config.listFeed.url}`);
-  console.log(`🧩 CDP: ${config.listFeed.cdpHost}:${config.listFeed.cdpPort}\n`);
+  console.log(`🧩 CDP: ${config.listFeed.cdpHost}:${activeCdpPort}\n`);
   
   await ensureDirs();
   
   // 1. List feed scrape
   console.log('⏰ 抓取 List feed 推文...\n');
-  const rawTweets = await scrapeListFeed();
+  const rawTweets = await scrapeListFeed(activeCdpPort);
 
   if (!rawTweets || rawTweets.length === 0) {
     console.log('⚠️ 未获取到推文，跳过报告生成');
@@ -229,7 +264,9 @@ ${report.report}`;
   console.log('\n✅ 日报生成完成!');
 }
 
-main().catch(err => {
+main().then(() => {
+  process.exit(0);
+}).catch(err => {
   console.error('❌ 执行失败:', err);
   process.exit(1);
 });

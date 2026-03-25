@@ -9,7 +9,7 @@ export const config = {
   listFeed: {
     url: process.env.LIST_FEED_URL || 'https://x.com/i/lists/2019940021005058347',
     cdpHost: process.env.LIST_FEED_CDP_HOST || '127.0.0.1',
-    cdpPort: Number(process.env.LIST_FEED_CDP_PORT || 18800),
+    cdpPort: Number(process.env.LIST_FEED_CDP_PORT || 18792),
     scrollCount: Number(process.env.LIST_FEED_SCROLL_COUNT || 40),
     scrollDelay: Number(process.env.LIST_FEED_SCROLL_DELAY || 2000),
     scrollAmount: Number(process.env.LIST_FEED_SCROLL_AMOUNT || 2000),
