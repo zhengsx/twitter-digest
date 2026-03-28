@@ -200,10 +200,24 @@ async function main() {
     console.warn('⚠️ YouTube 播客获取失败（不影响日报生成）:', err.message);
   }
 
-  // 6. 生成报告
+  // 6. 生成报告（带 daily-job 层重试：失败后 30s 重试一次）
   console.log(`🤖 正在用 ${config.openrouter.model} 生成报告...\n`);
-  const report = await generateReport(tweetsData, new Date(), youtubePodcasts);
-  
+  let report;
+  try {
+    try {
+      report = await generateReport(tweetsData, new Date(), youtubePodcasts);
+    } catch (firstErr) {
+      console.warn(`⚠️ 报告生成第 1 次失败: ${firstErr.message}，30s 后重试...`);
+      await new Promise(r => setTimeout(r, 30000));
+      report = await generateReport(tweetsData, new Date(), youtubePodcasts);
+    }
+  } catch (finalErr) {
+    console.error(`❌ 报告生成最终失败，跳过后续步骤（PDF/通知）`);
+    console.error(`   错误: ${finalErr.message}`);
+    console.log('\n⚠️ 日报生成未完成（报告生成失败），原始数据已保存。');
+    return;
+  }
+
   // 7. 保存报告 MD
   const reportPath = path.join(REPORTS_DIR, `report-${today}.md`);
   const youtubeStats = report.totalYoutubeVideos > 0 ? ` | 播客更新: ${report.totalYoutubeVideos}` : '';

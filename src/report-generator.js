@@ -2,6 +2,68 @@ import fetch from 'node-fetch';
 import { config } from './config.js';
 
 /**
+ * 带重试的 fetch：覆盖 fetch → response.text() → JSON.parse 全过程。
+ * 可重试：网络错误、HTTP 5xx、429；不重试：4xx 业务错误。
+ * @param {string} url
+ * @param {object} options - fetch options（不含 signal，内部每次新建 AbortController）
+ * @param {number} maxRetries - 最大重试次数（默认 3，共 maxRetries+1 次尝试）
+ * @returns {object} parsed JSON data
+ */
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  const BACKOFF = [5, 15, 45]; // 秒
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180000); // 3 分钟超时
+
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+
+      // HTTP 5xx / 429 → 可重试
+      if (response.status === 429 || response.status >= 500) {
+        const msg = `HTTP ${response.status} ${response.statusText}`;
+        throw Object.assign(new Error(msg), { retryable: true });
+      }
+
+      const rawText = await response.text();
+
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch (e) {
+        console.error('API response parse error. Raw length:', rawText.length, 'First 500 chars:', rawText.slice(0, 500));
+        throw Object.assign(
+          new Error(`API response is not valid JSON (${rawText.length} bytes)`),
+          { retryable: true },
+        );
+      }
+
+      return data; // 成功
+    } catch (err) {
+      lastError = err;
+      const retryable = err.retryable
+        || err.name === 'AbortError'
+        || err.name === 'FetchError'
+        || err.type === 'system'
+        || /ECONNRESET|premature close|socket hang up|UND_ERR/i.test(err.message);
+
+      if (!retryable || attempt > maxRetries) {
+        throw lastError;
+      }
+
+      const delaySec = BACKOFF[attempt - 1] || 45;
+      console.warn(`⚠️ API 调用失败 (attempt ${attempt}/${maxRetries + 1}): ${err.message}，${delaySec}s 后重试...`);
+      await new Promise(r => setTimeout(r, delaySec * 1000));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw lastError; // 不应到达，保险起见
+}
+
+/**
  * 用 OpenRouter API 生成报告（默认 Claude Opus 4.6）
  * @param {Array} tweetsData - 推文数据
  * @param {Date} date - 日期
@@ -74,37 +136,21 @@ ${youtubePodcasts && youtubePodcasts.length > 0 ? `
 - 保留所有人名、公司名、项目名
 - 链接必须保留`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 180000); // 3 分钟超时
-  
-  let response;
-  try {
-    response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.openrouter.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.openrouter.model,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 16000,
-      }),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-  
-  const rawText = await response.text();
-  let data;
-  try {
-    data = JSON.parse(rawText);
-  } catch (e) {
-    console.error('API response parse error. Raw length:', rawText.length, 'First 500 chars:', rawText.slice(0, 500));
-    throw new Error(`API response is not valid JSON (${rawText.length} bytes)`);
-  }
-  
+  const requestBody = JSON.stringify({
+    model: config.openrouter.model,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 16000,
+  });
+
+  const data = await fetchWithRetry('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.openrouter.apiKey}`,
+    },
+    body: requestBody,
+  });
+
   if (data.error) {
     throw new Error(`API 错误: ${data.error.message}`);
   }
