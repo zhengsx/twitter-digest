@@ -108,6 +108,36 @@ async function ensureDirs() {
   await fs.mkdir(REPORTS_DIR, { recursive: true });
 }
 
+async function notifyFailure(errorMessage, suggestion) {
+  const port = process.env.OPENCLAW_GATEWAY_PORT || 4152;
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+  
+  const text = `❌ 推特日报生成失败\n\n错误: ${errorMessage}\n\n建议: ${suggestion}`;
+  
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/api/message/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        channel: 'openclaw-weixin',
+        to: 'o9cq8098IQ2R72gf193fZuolDyw8@im.wechat',
+        accountId: '75a1dab92392-im-bot',
+        message: text,
+      }),
+    });
+    if (resp.ok) {
+      console.log('📨 已通知 sx 失败信息');
+    } else {
+      console.error('⚠️ 通知发送失败:', resp.status, await resp.text());
+    }
+  } catch (e) {
+    console.error('⚠️ 无法连接 Gateway 发送通知:', e.message);
+  }
+}
+
 async function main() {
   const activeCdpPort = await ensureCdpRunning();
 
@@ -214,6 +244,23 @@ async function main() {
   } catch (finalErr) {
     console.error(`❌ 报告生成最终失败，跳过后续步骤（PDF/通知）`);
     console.error(`   错误: ${finalErr.message}`);
+    
+    // 判断错误类型给出修复建议
+    let suggestion = '请检查日志并手动重跑: cd ~/Documents/Projects/twitter-digest && npm run daily';
+    if (/overload|529/i.test(finalErr.message)) {
+      suggestion = 'API 过载，稍后手动重跑或等明天自动重试';
+    } else if (/timeout|abort/i.test(finalErr.message)) {
+      suggestion = '请求超时，可能是网络问题或模型响应过慢，稍后重试';
+    } else if (/401|auth/i.test(finalErr.message)) {
+      suggestion = 'API Key 可能失效，检查 .env 里的 OPENROUTER_API_KEY';
+    } else if (/429|rate/i.test(finalErr.message)) {
+      suggestion = 'API 限流，等 10 分钟后手动重跑';
+    } else if (/JSON|parse/i.test(finalErr.message)) {
+      suggestion = 'API 返回异常数据，可能是临时问题，稍后重试';
+    }
+    
+    await notifyFailure(finalErr.message, suggestion);
+    
     console.log('\n⚠️ 日报生成未完成（报告生成失败），原始数据已保存。');
     return;
   }
@@ -280,7 +327,14 @@ ${report.report}`;
 
 main().then(() => {
   process.exit(0);
-}).catch(err => {
+}).catch(async (err) => {
   console.error('❌ 执行失败:', err);
+  
+  let suggestion = '请检查日志：cat /tmp/twitter-digest-stdout.log';
+  if (/CDP|Chrome|headless/i.test(err.message)) {
+    suggestion = 'Chrome CDP 不可用，需要重新配置浏览器连接';
+  }
+  
+  await notifyFailure(err.message, suggestion).catch(() => {});
   process.exit(1);
 });

@@ -27,7 +27,7 @@ export const config = {
   },
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY,
-    model: process.env.OPENROUTER_MODEL || 'anthropic/claude-opus-4.6',
+    model: process.env.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4.6',
   },
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN,

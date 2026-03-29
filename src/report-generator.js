@@ -15,7 +15,7 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180000); // 3 分钟超时
+    const timeout = setTimeout(() => controller.abort(), 600000); // 10 分钟超时
 
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
@@ -139,7 +139,7 @@ ${youtubePodcasts && youtubePodcasts.length > 0 ? `
   const requestBody = JSON.stringify({
     model: config.openrouter.model,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 16000,
+    max_tokens: 64000,
   });
 
   const data = await fetchWithRetry('https://openrouter.ai/api/v1/chat/completions', {
