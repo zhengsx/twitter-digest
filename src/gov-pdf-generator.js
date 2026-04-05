@@ -1,7 +1,6 @@
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
-import http from 'http';
 import { config } from './config.js';
 
 /**
@@ -294,119 +293,30 @@ export async function generateGovPdf(govReport, tweetsData, outputPath) {
   await fs.writeFile(htmlPath, html, 'utf-8');
   console.log(`📄 HTML 已生成: ${htmlPath}`);
 
-  // Use CDP to export PDF
-  const WebSocket = (await import('ws')).default;
-  const nodeFetch = (await import('node-fetch')).default;
+  // Use Playwright headless Chromium to export PDF
+  const { chromium } = await import('playwright');
 
-  const host = config.listFeed.cdpHost || '127.0.0.1';
-  const port = Number(config.listFeed.cdpPort || 18800);
-  const RELAY_PORT = 18792;
-  const RELAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
-  const tokenParam = port === RELAY_PORT ? `?token=${RELAY_TOKEN}` : '';
+  const htmlAbsPath = path.resolve(htmlPath);
+  const fileUrl = `file://${htmlAbsPath}`;
 
-  // Get page target
-  const listRes = await nodeFetch(`http://${host}:${port}/json/list${tokenParam}`);
-  const targets = await listRes.json();
-  const pageTarget = targets.find(t => t.type === 'page' && t.webSocketDebuggerUrl) || targets[0];
-  if (!pageTarget || !pageTarget.webSocketDebuggerUrl) {
-    throw new Error('No CDP page target found');
-  }
-
-  let wsUrl = pageTarget.webSocketDebuggerUrl;
-  if (port === RELAY_PORT && RELAY_TOKEN && !wsUrl.includes('token=')) {
-    wsUrl += (wsUrl.includes('?') ? '&' : '?') + `token=${RELAY_TOKEN}`;
-  }
-
-  const ws = new WebSocket(wsUrl, { handshakeTimeout: 10000 });
-  await new Promise((resolve, reject) => {
-    ws.once('open', resolve);
-    ws.once('error', reject);
-  });
-
-  let nextId = 1;
-  const pending = new Map();
-  ws.on('message', raw => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      if (typeof msg.id === 'number' && pending.has(msg.id)) {
-        const p = pending.get(msg.id);
-        pending.delete(msg.id);
-        if (msg.error) p.reject(new Error(msg.error.message));
-        else p.resolve(msg.result);
-      }
-    } catch {}
-  });
-
-  function cdpSend(method, params = {}) {
-    const id = nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error(`CDP timeout: ${method}`));
-      }, 30000);
-      pending.set(id, {
-        resolve: v => { clearTimeout(timer); resolve(v); },
-        reject: e => { clearTimeout(timer); reject(e); },
-      });
-      ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  // Start a temporary HTTP server to serve the HTML file
-  // (Chrome Relay does not allow file:// URLs)
-  const htmlDir = path.dirname(path.resolve(htmlPath));
-  const htmlFile = path.basename(htmlPath);
-  const srv = http.createServer((req, res) => {
-    const filePath = path.join(htmlDir, decodeURIComponent(req.url.split('?')[0]).slice(1));
-    if (!filePath.startsWith(htmlDir)) { res.writeHead(403); res.end(); return; }
-    fsSync.readFile(filePath, (err, data) => {
-      if (err) { res.writeHead(404); res.end(); return; }
-      const ext = path.extname(filePath).toLowerCase();
-      const mime = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.png': 'image/png', '.jpg': 'image/jpeg' }[ext] || 'application/octet-stream';
-      res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` });
-      res.end(data);
-    });
-  });
-  await new Promise((resolve, reject) => {
-    srv.listen(0, '127.0.0.1', () => resolve());
-    srv.once('error', reject);
-  });
-  const srvPort = srv.address().port;
-  const httpUrl = `http://127.0.0.1:${srvPort}/${htmlFile}`;
-  console.log(`🌐 临时 HTTP server 启动: port ${srvPort}`);
-
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
   try {
-    await cdpSend('Page.enable');
-
-    await cdpSend('Page.navigate', { url: httpUrl });
-
-    // Wait for load + images
-    await new Promise(r => setTimeout(r, 5000));
-
-    // Print to PDF
-    // v5: 水平边距由 HTML body padding 控制（微信 PDF 阅读器兼容）
-    // marginLeft/marginRight 设为 0，避免微信忽略 printToPDF margin 导致贴边
-    const pdfResult = await cdpSend('Page.printToPDF', {
-      landscape: false,
-      displayHeaderFooter: false,
+    await page.goto(fileUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    // Gov version: mobile-style narrow PDF (100mm × 180mm)
+    // Horizontal padding is controlled by HTML body, so margins are 0 on sides
+    await page.pdf({
+      path: outputPath,
+      width: '100mm',
+      height: '180mm',
       printBackground: true,
-      preferCSSPageSize: false,
-      paperWidth: 3.94,   // 100mm - mobile width
-      paperHeight: 7.09,  // 180mm - mobile height (9:16ish)
-      marginTop: 0.24,
-      marginBottom: 0.24,
-      marginLeft: 0,
-      marginRight: 0,
+      margin: { top: '6mm', bottom: '6mm', left: '0mm', right: '0mm' },
     });
-
-    const pdfBuffer = Buffer.from(pdfResult.data, 'base64');
-    await fs.writeFile(outputPath, pdfBuffer);
-    console.log(`✅ PDF 已生成: ${outputPath} (${(pdfBuffer.length / 1024).toFixed(0)} KB)`);
-
+    const stat = fsSync.statSync(outputPath);
+    console.log(`✅ PDF 已生成: ${outputPath} (${(stat.size / 1024).toFixed(0)} KB)`);
     return outputPath;
   } finally {
-    ws.close(1000, 'done');
-    srv.close();
+    await browser.close();
   }
 }
 

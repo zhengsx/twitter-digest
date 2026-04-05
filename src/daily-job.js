@@ -8,6 +8,7 @@ import { generateDailyPdf } from './html-pdf-generator.js';
 import { generateGovReport } from './gov-report-generator.js';
 import { generateGovPdf } from './gov-pdf-generator.js';
 import { fetchYouTubePodcasts } from './youtube-fetcher.js';
+import { execSync } from 'child_process';
 
 const DATA_DIR = config.paths.data;
 const REPORTS_DIR = config.paths.reports;
@@ -71,36 +72,27 @@ async function launchHeadless() {
 }
 
 /**
- * 确保 CDP 可用，优先使用 Chrome Relay (18792)，回退 headless (18800)。
+ * 确保 CDP 可用，直接使用 headless (18800)，跳过 relay（relay 有 bug #57209）。
  * 返回实际使用的端口号。
  */
 async function ensureCdpRunning() {
-  // 1. 先试 relay (18792)
-  if (await tryConnect(RELAY_PORT)) {
-    console.log('✅ Chrome Relay 连接成功 (18792)');
-    return RELAY_PORT;
-  }
-  console.warn('⚠️ Relay 不可达，回退到 headless CDP (18800)');
-
-  // 2. 再试 headless (18800)
+  // 直接使用 headless (18800)，跳过 relay
   if (await tryConnect(HEADLESS_PORT)) {
     console.log('✅ Headless CDP 连接成功 (18800)');
     return HEADLESS_PORT;
   }
 
-  // 3. 尝试启动 headless
+  // 尝试启动 headless
   await launchHeadless();
   if (await tryConnect(HEADLESS_PORT)) {
     console.log('✅ Headless CDP 启动并连接成功 (18800)');
     return HEADLESS_PORT;
   }
 
-  // 最后尝试：通知 sx
-  console.error('❌ Relay 和 Headless 均不可达。请确保：');
-  console.error('   1. Chrome 已打开');
-  console.error('   2. OpenClaw Browser Relay 扩展已 attach 一个 tab');
-  console.error('   3. 或者 headless Chrome 正在运行');
-  throw new Error('❌ Relay 和 Headless 均不可达，请检查 Chrome 状态');
+  console.error('❌ Headless CDP 不可达，请确保：');
+  console.error('   1. Chrome 已安装');
+  console.error('   2. headless Chrome 可以正常启动');
+  throw new Error('❌ Headless CDP 不可达，请检查 Chrome 状态');
 }
 
 async function ensureDirs() {
@@ -138,6 +130,191 @@ async function notifyFailure(errorMessage, suggestion) {
   }
 }
 
+/**
+ * Check if Twitter login has expired by looking for login buttons on the page.
+ * Uses CDP to evaluate JS in the current page context.
+ */
+async function checkLoginExpired(cdpPort) {
+  const WebSocket = (await import('ws')).default;
+  const nodeFetch = (await import('node-fetch')).default;
+  const host = config.listFeed.cdpHost || '127.0.0.1';
+  const RELAY_PORT = 18792;
+  const RELAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+  const tokenParam = cdpPort === RELAY_PORT ? `?token=${RELAY_TOKEN}` : '';
+
+  try {
+    const listRes = await nodeFetch(
+      `http://${host}:${cdpPort}/json/list${tokenParam}`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    const targets = await listRes.json();
+    const pageTarget = targets.find(
+      t => t.type === 'page' && t.webSocketDebuggerUrl
+    );
+    if (!pageTarget) return false;
+
+    let wsUrl = pageTarget.webSocketDebuggerUrl;
+    if (cdpPort === RELAY_PORT && RELAY_TOKEN && !wsUrl.includes('token=')) {
+      wsUrl += (wsUrl.includes('?') ? '&' : '?') + `token=${RELAY_TOKEN}`;
+    }
+
+    const ws = new WebSocket(wsUrl, { handshakeTimeout: 5000 });
+    await new Promise((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+
+    let nextId = 1;
+    const pending = new Map();
+    ws.on('message', raw => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (typeof msg.id === 'number' && pending.has(msg.id)) {
+          const p = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) p.reject(new Error(msg.error.message));
+          else p.resolve(msg.result);
+        }
+      } catch {}
+    });
+
+    function cdpSend(method, params = {}) {
+      const id = nextId++;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`CDP timeout: ${method}`));
+        }, 10000);
+        pending.set(id, {
+          resolve: v => { clearTimeout(timer); resolve(v); },
+          reject: e => { clearTimeout(timer); reject(e); },
+        });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+    }
+
+    const res = await cdpSend('Runtime.evaluate', {
+      expression: `!!document.querySelector('[data-testid="loginButton"], a[href="/login"], [data-testid="login"]')`,
+      returnByValue: true,
+    });
+    ws.close(1000, 'done');
+    return res?.result?.value === true;
+  } catch (err) {
+    console.warn(`⚠️ checkLoginExpired 检查失败: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Sync Twitter/X cookies from the user's main Chrome to the headless profile.
+ * Returns true if sync succeeded and headless Chrome was restarted.
+ */
+async function syncCookiesFromMainChrome() {
+  try {
+    const srcCookies = path.join(
+      process.env.HOME,
+      'Library/Application Support/Google/Chrome/Default/Cookies'
+    );
+    const dstDir = '/tmp/chrome-cdp-profile/Default';
+    const dstCookies = path.join(dstDir, 'Cookies');
+
+    // Check source exists
+    try {
+      await fs.access(srcCookies);
+    } catch {
+      console.error('❌ 主 Chrome Cookies 文件不存在:', srcCookies);
+      return false;
+    }
+
+    // Ensure destination dir exists
+    await fs.mkdir(dstDir, { recursive: true });
+
+    // Copy source to temp to avoid lock, then use python3+sqlite3 to transfer
+    const pythonScript = `
+import sqlite3, shutil, os
+src = '/tmp/chrome-cookies-src-copy'
+shutil.copy2('${srcCookies}', src)
+dst = '${dstCookies}'
+
+# Open source and read twitter/x.com cookies
+src_conn = sqlite3.connect(src)
+try:
+    src_cookies = src_conn.execute(
+        "SELECT * FROM cookies WHERE host_key LIKE '%x.com%' OR host_key LIKE '%twitter.com%'"
+    ).fetchall()
+    col_names = [d[0] for d in src_conn.execute("SELECT * FROM cookies LIMIT 0").description]
+except Exception as e:
+    print(f"Error reading source cookies: {e}")
+    src_conn.close()
+    os.remove(src)
+    exit(1)
+src_conn.close()
+os.remove(src)
+
+if not src_cookies:
+    print("No twitter/x.com cookies found in source")
+    exit(1)
+
+print(f"Found {len(src_cookies)} twitter/x.com cookies in source Chrome")
+
+# Open or create destination cookies DB
+dst_conn = sqlite3.connect(dst)
+try:
+    # Try to get existing table info
+    dst_conn.execute("SELECT * FROM cookies LIMIT 0")
+except:
+    # Create table if it doesn't exist - copy schema from source
+    src_tmp = sqlite3.connect('${srcCookies}')
+    schema = src_tmp.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='cookies'").fetchone()
+    src_tmp.close()
+    if schema:
+        dst_conn.execute(schema[0])
+        dst_conn.commit()
+
+# Delete old twitter cookies in destination
+dst_conn.execute("DELETE FROM cookies WHERE host_key LIKE '%x.com%' OR host_key LIKE '%twitter.com%'")
+
+# Insert new cookies
+placeholders = ','.join(['?' for _ in col_names])
+dst_conn.executemany(f"INSERT INTO cookies ({','.join(col_names)}) VALUES ({placeholders})", src_cookies)
+dst_conn.commit()
+dst_conn.close()
+print(f"Synced {len(src_cookies)} cookies to headless profile")
+`;
+
+    execSync(`python3 -c ${JSON.stringify(pythonScript)}`, {
+      timeout: 15000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    console.log('✅ Cookie 数据库已同步');
+
+    // Kill existing headless chrome so LaunchAgent restarts it
+    try {
+      execSync('pkill -f "chrome.*headless.*chrome-cdp-profile"', {
+        timeout: 5000,
+        stdio: 'pipe',
+      });
+      console.log('🔄 已终止旧 headless Chrome，等待重启...');
+    } catch {
+      // Process might not exist, that's ok
+      console.log('ℹ️ 未找到运行中的 headless Chrome 进程');
+    }
+
+    // Wait for CDP to come back (LaunchAgent auto-restart)
+    const recovered = await waitForCdp(HEADLESS_PORT, 20000);
+    if (!recovered) {
+      // Try launching manually
+      console.log('⚠️ LaunchAgent 未自动重启，手动启动 headless Chrome...');
+      await launchHeadless();
+    }
+    console.log('✅ Headless Chrome 已恢复');
+    return true;
+  } catch (err) {
+    console.error(`❌ Cookie 同步失败: ${err.message}`);
+    return false;
+  }
+}
+
 async function main() {
   const activeCdpPort = await ensureCdpRunning();
 
@@ -150,11 +327,26 @@ async function main() {
   
   // 1. List feed scrape
   console.log('⏰ 抓取 List feed 推文...\n');
-  const rawTweets = await scrapeListFeed(activeCdpPort);
+  let rawTweets = await scrapeListFeed(activeCdpPort);
 
   if (!rawTweets || rawTweets.length === 0) {
-    console.log('⚠️ 未获取到推文，跳过报告生成');
-    return;
+    // Check if login expired (cookie issue)
+    const loginExpired = await checkLoginExpired(activeCdpPort);
+    if (loginExpired) {
+      console.error('❌ Twitter 登录态已过期！尝试自动同步 cookie...');
+      const synced = await syncCookiesFromMainChrome();
+      if (synced) {
+        console.log('🔄 Cookie 已同步，重新尝试抓取...');
+        const retryTweets = await scrapeListFeed(activeCdpPort);
+        if (retryTweets && retryTweets.length > 0) {
+          rawTweets = retryTweets; // fall through to normal flow
+        }
+      }
+    }
+    if (!rawTweets || rawTweets.length === 0) {
+      console.log('⚠️ 未获取到推文，跳过报告生成');
+      return;
+    }
   }
 
   // 2. 过滤 24h 内

@@ -9,8 +9,8 @@ import { config } from './config.js';
  * @param {number} maxRetries - 最大重试次数（默认 3，共 maxRetries+1 次尝试）
  * @returns {object} parsed JSON data
  */
-async function fetchWithRetry(url, options, maxRetries = 3) {
-  const BACKOFF = [5, 15, 45]; // 秒
+async function fetchWithRetry(url, options, maxRetries = 4) {
+  const BACKOFF = [10, 30, 60, 90]; // 秒（更宽裕的退避，应对 OpenRouter 不稳定）
   let lastError;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
