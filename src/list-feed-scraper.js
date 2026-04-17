@@ -133,6 +133,37 @@ async function getPageTargetWsUrl({ host, port }) {
   return preferred.webSocketDebuggerUrl;
 }
 
+// Create a fresh about:blank tab so we don't hijack whatever the user has open,
+// and avoid Chrome 147 quirk where Page.enable hangs on existing chrome://newtab/ pages.
+// Returns { wsUrl, targetId } so caller can close it in the finally block.
+async function createFreshPageTarget({ host, port }) {
+  const url = `http://${host}:${port}/json/new?about:blank`;
+  // PUT is the modern verb; GET still works on older Chrome. Try PUT first, fall back to GET.
+  let res;
+  try {
+    res = await withTimeout(fetch(url, { method: 'PUT' }), 5000, `PUT ${url}`);
+    if (!res.ok) throw new Error(`PUT /json/new HTTP ${res.status}`);
+  } catch (e) {
+    res = await withTimeout(fetch(url), 5000, `GET ${url}`);
+    if (!res.ok) throw new Error(`GET /json/new HTTP ${res.status}`);
+  }
+  const target = await res.json();
+  if (!target || !target.webSocketDebuggerUrl || !target.id) {
+    throw new Error(`/json/new returned invalid target: ${JSON.stringify(target).slice(0, 200)}`);
+  }
+  return { wsUrl: target.webSocketDebuggerUrl, targetId: target.id };
+}
+
+async function closePageTarget({ host, port, targetId }) {
+  if (!targetId) return;
+  try {
+    const url = `http://${host}:${port}/json/close/${targetId}`;
+    await withTimeout(fetch(url), 5000, `GET ${url}`);
+  } catch (e) {
+    console.warn(`[list-feed] Failed to close target ${targetId}: ${e.message}`);
+  }
+}
+
 const EXTRACT_TWEETS_JS = `
 (() => {
   window.__allTweets = window.__allTweets || {};
@@ -231,8 +262,20 @@ export async function scrapeListFeed(overrideCdpPort) {
   console.log(`[list-feed] URL: ${cfg.url}`);
 
   let ws;
+  let freshTargetId = null;
   try {
-    const wsUrl = await getPageTargetWsUrl({ host, port });
+    // Create a dedicated fresh about:blank tab to avoid Chrome 147's
+    // Page.enable-hangs-on-chrome://newtab/ quirk (seen in cron runs).
+    let wsUrl;
+    try {
+      const fresh = await createFreshPageTarget({ host, port });
+      wsUrl = fresh.wsUrl;
+      freshTargetId = fresh.targetId;
+      console.log(`[list-feed] Created fresh CDP target: ${freshTargetId}`);
+    } catch (e) {
+      console.warn(`[list-feed] createFreshPageTarget failed, falling back to existing target: ${e.message}`);
+      wsUrl = await getPageTargetWsUrl({ host, port });
+    }
     console.log(`[list-feed] Using CDP WS: ${wsUrl}`);
 
     ws = new WebSocket(wsUrl, { handshakeTimeout: 10000 });
@@ -317,6 +360,10 @@ export async function scrapeListFeed(overrideCdpPort) {
   } finally {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.close(1000, 'done');
+    }
+    // Clean up the fresh tab we created so we don't leak tabs over time.
+    if (freshTargetId) {
+      await closePageTarget({ host, port, targetId: freshTargetId });
     }
   }
 }
