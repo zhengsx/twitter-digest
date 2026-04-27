@@ -1,3 +1,16 @@
+// GraphQL-based list-feed scraper (rewritten 2026-04-27)
+//
+// Why: as of 2026-04-25, X.com's list timeline DOM stops virtualizing more than
+// ~5 articles when scrolled by automation, even though the underlying graphql
+// `ListLatestTweetsTimeline` API returns ~90 tweets per page. The old DOM scrape
+// approach silently degraded from ~150 tweets to 4-5 tweets per run.
+//
+// Fix: navigate the page (so cookies/CSRF/headers are correctly set by the SPA),
+// capture the graphql JSON response via CDP Network domain, parse tweet objects
+// directly. No reliance on DOM rendering or scroll virtualization.
+//
+// Backward-compatible signature: scrapeListFeed(overrideCdpPort) returns
+//   Array<{author, text, datetime, tweetUrl, images}>
 import WebSocket from 'ws';
 import fetch from 'node-fetch';
 import { config } from './config.js';
@@ -11,14 +24,8 @@ function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`Timeout after ${ms}ms: ${label}`)), ms);
     promise.then(
-      v => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      e => {
-        clearTimeout(t);
-        reject(e);
-      }
+      v => { clearTimeout(t); resolve(v); },
+      e => { clearTimeout(t); reject(e); }
     );
   });
 }
@@ -27,128 +34,60 @@ class CdpClient {
   constructor(ws) {
     this.ws = ws;
     this.nextId = 1;
-    this.pending = new Map(); // id -> {resolve, reject, timer}
-    this.eventWaiters = new Map(); // method -> Set<{predicate, resolve, reject, timer}>
-
+    this.pending = new Map();
+    this.listeners = new Map(); // method -> array of fn
     ws.on('message', raw => {
       let msg;
-      try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        return;
-      }
-
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
       if (typeof msg.id === 'number') {
         const p = this.pending.get(msg.id);
         if (!p) return;
         this.pending.delete(msg.id);
         if (p.timer) clearTimeout(p.timer);
-        if (msg.error) {
-          p.reject(new Error(`CDP error ${msg.error.code}: ${msg.error.message}`));
-        } else {
-          p.resolve(msg.result);
-        }
+        if (msg.error) p.reject(new Error(`CDP error ${msg.error.code}: ${msg.error.message}`));
+        else p.resolve(msg.result);
         return;
       }
-
       if (msg.method) {
-        const waiters = this.eventWaiters.get(msg.method);
-        if (!waiters || waiters.size === 0) return;
-        for (const w of [...waiters]) {
-          try {
-            if (w.predicate && !w.predicate(msg.params)) continue;
-          } catch (e) {
-            waiters.delete(w);
-            if (w.timer) clearTimeout(w.timer);
-            w.reject(e);
-            continue;
-          }
-          waiters.delete(w);
-          if (w.timer) clearTimeout(w.timer);
-          w.resolve(msg.params);
-        }
+        const fns = this.listeners.get(msg.method);
+        if (fns) for (const fn of fns) { try { fn(msg.params); } catch {} }
       }
     });
   }
-
+  on(method, fn) {
+    if (!this.listeners.has(method)) this.listeners.set(method, []);
+    this.listeners.get(method).push(fn);
+  }
   send(method, params = {}, timeoutMs = 15000) {
     const id = this.nextId++;
-    const payload = { id, method, params };
     return new Promise((resolve, reject) => {
       let timer = null;
-      if (timeoutMs && timeoutMs > 0) {
+      if (timeoutMs > 0) {
         timer = setTimeout(() => {
-          this.pending.delete(id);
-          reject(new Error(`CDP call timeout after ${timeoutMs}ms: ${method}`));
+          if (this.pending.has(id)) {
+            this.pending.delete(id);
+            reject(new Error(`CDP timeout: ${method} (${timeoutMs}ms)`));
+          }
         }, timeoutMs);
       }
       this.pending.set(id, { resolve, reject, timer });
-      this.ws.send(JSON.stringify(payload), err => {
-        if (!err) return;
-        this.pending.delete(id);
-        if (timer) clearTimeout(timer);
-        reject(err);
-      });
-    });
-  }
-
-  waitForEvent(method, { predicate = null, timeoutMs = 15000 } = {}) {
-    return new Promise((resolve, reject) => {
-      const waiters = this.eventWaiters.get(method) || new Set();
-      const w = { predicate, resolve, reject, timer: null };
-      if (timeoutMs && timeoutMs > 0) {
-        w.timer = setTimeout(() => {
-          waiters.delete(w);
-          reject(new Error(`CDP event timeout after ${timeoutMs}ms: ${method}`));
-        }, timeoutMs);
-      }
-      waiters.add(w);
-      this.eventWaiters.set(method, waiters);
+      this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
 }
 
-async function getPageTargetWsUrl({ host, port }) {
-  // Relay (18792) is skipped due to bug #57209; only headless (18800) is used
-  const url = `http://${host}:${port}/json/list`;
-  const res = await withTimeout(fetch(url), 5000, `GET ${url}`);
-  if (!res.ok) {
-    throw new Error(`Failed to query CDP targets: HTTP ${res.status} ${res.statusText}`);
-  }
-  const targets = await res.json();
-  if (!Array.isArray(targets) || targets.length === 0) {
-    throw new Error('No CDP targets returned from /json/list');
-  }
-
-  // Prefer an existing page target with a mostly blank URL (so we don't hijack another workflow).
-  const pageTargets = targets.filter(t => t && t.type === 'page' && t.webSocketDebuggerUrl);
-  if (pageTargets.length === 0) {
-    throw new Error('No CDP page targets with webSocketDebuggerUrl found');
-  }
-
-  const preferred =
-    pageTargets.find(t => !t.url || t.url === 'about:blank' || t.url.startsWith('chrome://')) ||
-    pageTargets[0];
-
-  return preferred.webSocketDebuggerUrl;
-}
-
-// Create a fresh about:blank tab so we don't hijack whatever the user has open,
-// and avoid Chrome 147 quirk where Page.enable hangs on existing chrome://newtab/ pages.
-// Returns { wsUrl, targetId } so caller can close it in the finally block.
 async function createFreshPageTarget({ host, port }) {
   const url = `http://${host}:${port}/json/new?about:blank`;
-  // PUT is the modern verb; GET still works on older Chrome. Try PUT first, fall back to GET.
   let res;
   try {
     res = await withTimeout(fetch(url, { method: 'PUT' }), 5000, `PUT ${url}`);
     if (!res.ok) throw new Error(`PUT /json/new HTTP ${res.status}`);
-  } catch (e) {
+  } catch {
     res = await withTimeout(fetch(url), 5000, `GET ${url}`);
     if (!res.ok) throw new Error(`GET /json/new HTTP ${res.status}`);
   }
   const target = await res.json();
-  if (!target || !target.webSocketDebuggerUrl || !target.id) {
+  if (!target?.webSocketDebuggerUrl || !target?.id) {
     throw new Error(`/json/new returned invalid target: ${JSON.stringify(target).slice(0, 200)}`);
   }
   return { wsUrl: target.webSocketDebuggerUrl, targetId: target.id };
@@ -157,115 +96,111 @@ async function createFreshPageTarget({ host, port }) {
 async function closePageTarget({ host, port, targetId }) {
   if (!targetId) return;
   try {
-    const url = `http://${host}:${port}/json/close/${targetId}`;
-    await withTimeout(fetch(url), 5000, `GET ${url}`);
+    await withTimeout(fetch(`http://${host}:${port}/json/close/${targetId}`), 5000, 'close target');
   } catch (e) {
     console.warn(`[list-feed] Failed to close target ${targetId}: ${e.message}`);
   }
 }
 
-const EXTRACT_TWEETS_JS = `
-(() => {
-  window.__allTweets = window.__allTweets || {};
+// --- Parse one timeline graphql response into normalized tweet objects ----
+function parseTimelineResponse(json) {
+  const out = [];
+  let nextCursor = null;
+  try {
+    const instructions = json?.data?.list?.tweets_timeline?.timeline?.instructions || [];
+    for (const ins of instructions) {
+      const entries = ins.entries || ins.entry ? (ins.entries || [ins.entry]) : [];
+      for (const e of entries) {
+        // cursor entries
+        const cursorVal = e?.content?.value;
+        const cursorType = e?.content?.cursorType;
+        if (cursorType === 'Bottom' && cursorVal) {
+          nextCursor = cursorVal;
+          continue;
+        }
+        const r = e?.content?.itemContent?.tweet_results?.result;
+        if (!r) continue;
+        // unwrap TweetWithVisibilityResults
+        const tweetObj = r.__typename === 'TweetWithVisibilityResults' ? r.tweet : r;
+        const legacy = tweetObj?.legacy;
+        if (!legacy) continue;
 
-  function extractTweets() {
-    const articles = document.querySelectorAll('article[data-testid="tweet"]');
-    for (const art of articles) {
-      try {
-        const timeEl = art.querySelector('time');
-        if (!timeEl) continue;
-        const datetime = timeEl.getAttribute('datetime') || '';
-        const textEl = art.querySelector('[data-testid="tweetText"]');
-        const text = textEl ? textEl.innerText : '';
+        const userR =
+          tweetObj?.core?.user_results?.result ||
+          r?.core?.user_results?.result;
+        // X moved screen_name from legacy to core (2026)
+        const screenName =
+          userR?.core?.screen_name ||
+          userR?.legacy?.screen_name ||
+          '';
 
-        // Extract @handle
-        const userLinks = art.querySelectorAll('a[href^="/"]');
-        let author = '';
-        for (const link of userLinks) {
-          const spans = link.querySelectorAll('span');
-          for (const span of spans) {
-            const s = (span.textContent || '').trim();
-            if (s.startsWith('@')) {
-              author = s;
-              break;
-            }
-          }
-          if (author) break;
+        // Resolve full_text (may be truncated for retweets)
+        let text = legacy.full_text || '';
+        const rt = legacy.retweeted_status_result?.result;
+        if (rt) {
+          const rtTweet = rt.__typename === 'TweetWithVisibilityResults' ? rt.tweet : rt;
+          const rtFull = rtTweet?.legacy?.full_text;
+          const rtUser =
+            rtTweet?.core?.user_results?.result?.core?.screen_name ||
+            rtTweet?.core?.user_results?.result?.legacy?.screen_name ||
+            '';
+          if (rtFull) text = `RT @${rtUser}: ${rtFull}`;
         }
 
-        // Extract tweet URL
-        const timeLink = timeEl.closest('a');
-        let tweetUrl = '';
-        if (timeLink) {
-          const href = timeLink.getAttribute('href') || '';
-          if (href.startsWith('http')) tweetUrl = href;
-          else if (href.startsWith('/')) tweetUrl = 'https://x.com' + href;
-        }
-
-        // Extract images
+        // images (from extended_entities.media or entities.media)
         const images = [];
-        const photoImgs = art.querySelectorAll('[data-testid="tweetPhoto"] img');
-        for (const img of photoImgs) {
-          let src = img.src || '';
-          if (src && src.includes('pbs.twimg.com')) {
-            src = src.replace(/name=\\w+/, 'name=large');
-            if (!src.includes('name=')) src += '?name=large';
-            images.push(src);
+        const media =
+          legacy.extended_entities?.media ||
+          legacy.entities?.media ||
+          [];
+        for (const m of media) {
+          let url = m.media_url_https || m.media_url || '';
+          if (url) {
+            // Use large variant
+            url = url.includes('?') ? url : `${url}?name=large`;
+            images.push(url);
           }
         }
-        const videoEls = art.querySelectorAll('[data-testid="videoPlayer"] video');
-        for (const vid of videoEls) {
-          const poster = vid.poster || '';
-          if (poster) images.push(poster);
-        }
 
-        const key = tweetUrl || (datetime + '|' + text.substring(0, 50));
-        if (!window.__allTweets[key]) {
-          window.__allTweets[key] = {
-            author,
-            text: (text || '').substring(0, 800),
-            datetime,
-            tweetUrl,
-            images
-          };
+        const id = legacy.id_str || tweetObj?.rest_id || '';
+        const created = legacy.created_at || ''; // "Sun Apr 27 05:32:35 +0000 2026"
+        // ISO datetime
+        let datetime = '';
+        if (created) {
+          const d = new Date(created);
+          if (!isNaN(d.getTime())) datetime = d.toISOString();
         }
-      } catch (e) {}
+        const author = screenName ? `@${screenName}` : '';
+        const tweetUrl = screenName && id ? `https://x.com/${screenName}/status/${id}` : '';
+
+        out.push({ author, text: text.substring(0, 800), datetime, tweetUrl, images });
+      }
     }
+  } catch (e) {
+    console.warn(`[list-feed] parseTimelineResponse error: ${e.message}`);
   }
+  return { tweets: out, nextCursor };
+}
 
-  extractTweets();
-  return true;
-})()
-`;
-
-const GET_TWEETS_JS = `
-(() => {
-  const obj = window.__allTweets || {};
-  return Object.values(obj);
-})()
-`;
-
-/**
- * CDP-based X List feed scraper.
- * Returns: Array<{author, text, datetime, tweetUrl}>
- */
+// ---- Main entry ----
 export async function scrapeListFeed(overrideCdpPort) {
   const cfg = config.listFeed;
-  if (!cfg || !cfg.url) {
-    throw new Error('Missing config.listFeed.url (set LIST_FEED_URL)');
-  }
+  if (!cfg || !cfg.url) throw new Error('Missing config.listFeed.url (set LIST_FEED_URL)');
 
   const host = cfg.cdpHost || '127.0.0.1';
   const port = overrideCdpPort != null ? Number(overrideCdpPort) : Number(cfg.cdpPort || 18800);
 
   console.log(`[list-feed] CDP target: ${host}:${port}`);
   console.log(`[list-feed] URL: ${cfg.url}`);
+  console.log('[list-feed] Mode: graphql-capture (DOM-independent)');
 
-  let ws;
-  let freshTargetId = null;
+  // How many graphql pages to capture. Default 4 (~4*90 = 360 tweets), enough
+  // for a daily digest with 24h filtering. Configurable via LIST_FEED_PAGES.
+  const maxPages = Number(process.env.LIST_FEED_PAGES) || cfg.maxPages || 4;
+  const pageWaitMs = Number(process.env.LIST_FEED_PAGE_WAIT_MS) || cfg.pageWaitMs || 8000;
+
+  let ws, freshTargetId = null;
   try {
-    // Create a dedicated fresh about:blank tab to avoid Chrome 147's
-    // Page.enable-hangs-on-chrome://newtab/ quirk (seen in cron runs).
     let wsUrl;
     try {
       const fresh = await createFreshPageTarget({ host, port });
@@ -273,10 +208,8 @@ export async function scrapeListFeed(overrideCdpPort) {
       freshTargetId = fresh.targetId;
       console.log(`[list-feed] Created fresh CDP target: ${freshTargetId}`);
     } catch (e) {
-      console.warn(`[list-feed] createFreshPageTarget failed, falling back to existing target: ${e.message}`);
-      wsUrl = await getPageTargetWsUrl({ host, port });
+      throw new Error(`Failed to create fresh CDP target: ${e.message}`);
     }
-    console.log(`[list-feed] Using CDP WS: ${wsUrl}`);
 
     ws = new WebSocket(wsUrl, { handshakeTimeout: 10000 });
     await withTimeout(
@@ -290,81 +223,111 @@ export async function scrapeListFeed(overrideCdpPort) {
 
     const cdp = new CdpClient(ws);
 
+    // Capture timeline responses
+    const timelineRequests = []; // {requestId, url}
+    cdp.on('Network.responseReceived', params => {
+      const url = params?.response?.url || '';
+      if (url.includes('ListLatestTweetsTimeline')) {
+        timelineRequests.push({ requestId: params.requestId, url });
+      }
+    });
+    cdp.on('Network.loadingFailed', params => {
+      // ignore for now; we'll just see fewer responses
+    });
+
+    await cdp.send('Network.enable');
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
 
-    // Navigate.
-    await cdp.send('Page.navigate', { url: cfg.url }, 15000);
-
-    // Prefer waiting for the load event, but also keep a fixed delay for stability on cron.
+    // Patch navigator.webdriver before any page load (cheap "stealth" — does not
+    // affect today's behaviour but may help if X tightens detection later).
     try {
-      await cdp.waitForEvent('Page.loadEventFired', { timeoutMs: Math.max(10000, cfg.pageLoadTimeoutMs || 30000) });
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: `Object.defineProperty(navigator, 'webdriver', {get: () => undefined});`
+      });
+    } catch {}
+
+    // Initial navigation
+    console.log(`[list-feed] Navigating to list (page 1)...`);
+    await cdp.send('Page.navigate', { url: cfg.url }, 15000);
+    try {
+      // wait for load event but don't fail if it never fires
+      await new Promise((res, rej) => {
+        const t = setTimeout(() => rej(new Error('loadEventFired timeout')), 30000);
+        const wrap = () => { clearTimeout(t); res(); };
+        cdp.on('Page.loadEventFired', wrap);
+      });
     } catch (e) {
-      console.warn(`[list-feed] loadEventFired wait failed (continuing): ${e.message}`);
+      console.warn(`[list-feed] loadEventFired wait: ${e.message} (continuing)`);
     }
-    await sleep(cfg.pageLoadDelay);
+    await sleep(pageWaitMs);
 
-    // Extract + scroll loop.
-    const scrollCount = cfg.scrollCount;
-    const scrollDelay = cfg.scrollDelay;
-    const scrollAmount = cfg.scrollAmount;
+    // Trigger more graphql pages by scrolling. Even if DOM doesn't render
+    // the new tweets, the scroll handler will issue paginated graphql requests
+    // for IntersectionObserver targets in the timeline.
+    for (let page = 1; page < maxPages; page++) {
+      console.log(`[list-feed] Triggering page ${page + 1}/${maxPages} via scroll...`);
+      // Programmatic scrolls + dispatch scroll events
+      for (let s = 0; s < 6; s++) {
+        await cdp.send('Runtime.evaluate', {
+          expression: `
+            window.scrollTo({top: window.scrollY + 1500, behavior: 'auto'});
+            window.dispatchEvent(new Event('scroll', {bubbles: true}));
+          `
+        }).catch(() => {});
+        await sleep(800);
+      }
+      await sleep(pageWaitMs);
+    }
 
-    console.log(`[list-feed] Scrolling: count=${scrollCount} amount=${scrollAmount}px delay=${scrollDelay}ms`);
+    console.log(`[list-feed] Captured ${timelineRequests.length} ListLatestTweetsTimeline response(s)`);
 
-    for (let i = 0; i < scrollCount; i++) {
-      await cdp.send(
-        'Runtime.evaluate',
-        { expression: EXTRACT_TWEETS_JS, returnByValue: true, awaitPromise: true },
-        15000
-      );
-      await cdp.send(
-        'Runtime.evaluate',
-        { expression: `window.scrollBy(0, ${scrollAmount}); true;`, returnByValue: true },
-        15000
-      );
-      await sleep(scrollDelay);
-      // Log progress every 10 scrolls
-      if ((i + 1) % 10 === 0) {
-        const midRes = await cdp.send('Runtime.evaluate', { expression: 'Object.keys(window.__allTweets || {}).length', returnByValue: true }, 10000);
-        const midCount = midRes?.result?.value ?? '?';
-        console.log(`[list-feed] Scroll ${i + 1}/${scrollCount}: ${midCount} tweets so far`);
+    // Pull bodies and parse
+    const allTweets = new Map();
+    let pageNum = 0;
+    for (const req of timelineRequests) {
+      pageNum++;
+      try {
+        const body = await cdp.send('Network.getResponseBody', { requestId: req.requestId }, 10000);
+        const txt = body.body || '';
+        const json = JSON.parse(txt);
+        const { tweets } = parseTimelineResponse(json);
+        let added = 0;
+        for (const t of tweets) {
+          const key = t.tweetUrl || `${t.author}|${t.datetime}|${t.text.substring(0, 50)}`;
+          if (!allTweets.has(key)) {
+            allTweets.set(key, t);
+            added++;
+          }
+        }
+        console.log(`[list-feed]   page ${pageNum}: body=${(txt.length / 1024).toFixed(0)}K, parsed=${tweets.length}, new=${added}`);
+      } catch (e) {
+        console.warn(`[list-feed]   page ${pageNum}: ${e.message}`);
       }
     }
 
-    // Final extract + read results.
-    await cdp.send('Runtime.evaluate', { expression: EXTRACT_TWEETS_JS, returnByValue: true, awaitPromise: true }, 15000);
-    const res = await cdp.send('Runtime.evaluate', { expression: GET_TWEETS_JS, returnByValue: true, awaitPromise: true }, 20000);
-    const tweets = (res && res.result && Array.isArray(res.result.value)) ? res.result.value : [];
+    const out = Array.from(allTweets.values());
+    console.log(`[list-feed] Extracted tweets: ${out.length}`);
 
-    const out = [];
-    const seen = new Set();
-    for (const t of tweets) {
-      if (!t || typeof t !== 'object') continue;
-      const author = (t.author || '').trim();
-      const text = (t.text || '').trim();
-      const datetime = (t.datetime || '').trim();
-      let tweetUrl = (t.tweetUrl || '').trim();
-      if (tweetUrl && tweetUrl.startsWith('/')) tweetUrl = `https://x.com${tweetUrl}`;
-      const key = tweetUrl || `${author}|${datetime}|${text.slice(0, 50)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const images = Array.isArray(t.images) ? t.images : [];
-      out.push({ author, text, datetime, tweetUrl, images });
+    // If we got 0 tweets but had requests, something is wrong (parsing or empty list)
+    if (out.length === 0 && timelineRequests.length > 0) {
+      console.warn('[list-feed] 0 tweets parsed despite captured responses; structure may have changed');
+    }
+    // If 0 captured responses at all, page may be redirected to login or X is blocking
+    if (timelineRequests.length === 0) {
+      console.warn('[list-feed] 0 ListLatestTweetsTimeline responses captured — cookie expired or list URL wrong?');
     }
 
-    console.log(`[list-feed] Extracted tweets: ${out.length}`);
     return out;
   } catch (err) {
     console.error('[list-feed] Scrape failed:', err);
     throw err;
   } finally {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close(1000, 'done');
+      try { ws.close(1000, 'done'); } catch {}
     }
-    // Clean up the fresh tab we created so we don't leak tabs over time.
     if (freshTargetId) {
       await closePageTarget({ host, port, targetId: freshTargetId });
     }
   }
 }
-
