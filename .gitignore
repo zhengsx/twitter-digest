@@ -5,3 +5,4 @@ reports/
 logs/
 *.log
 .DS_Store
+src/list-feed-scraper.js.bak-*
