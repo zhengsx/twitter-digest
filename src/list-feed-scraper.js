@@ -1,13 +1,26 @@
-// GraphQL-based list-feed scraper (rewritten 2026-04-27)
+// GraphQL cursor-paginated list-feed scraper (proposed 2026-05-01).
 //
-// Why: as of 2026-04-25, X.com's list timeline DOM stops virtualizing more than
-// ~5 articles when scrolled by automation, even though the underlying graphql
-// `ListLatestTweetsTimeline` API returns ~90 tweets per page. The old DOM scrape
-// approach silently degraded from ~150 tweets to 4-5 tweets per run.
+// Background:
+//   - Old DOM scrape (pre-2026-04-25) returned 150-180 tweets. Died when
+//     X.com tightened the IntersectionObserver virtualization (only ~5
+//     articles render at once in automation contexts).
+//   - 2026-04-27 graphql-capture replaced DOM scrape: navigate the SPA, sniff
+//     the single ListLatestTweetsTimeline response → ~80 tweets. Sufficient
+//     but halved the daily input.
+//   - This rewrite ADDS cursor-based pagination: after the SPA's first
+//     graphql response, replay the same endpoint via page-context fetch using
+//     the Bottom cursor. This is the same call the SPA makes when the user
+//     scrolls — only the trigger is different.
 //
-// Fix: navigate the page (so cookies/CSRF/headers are correctly set by the SPA),
-// capture the graphql JSON response via CDP Network domain, parse tweet objects
-// directly. No reliance on DOM rendering or scroll virtualization.
+// Safety profile (see outputs/twitter-scraper-fix-report.md for full eval):
+//   - All requests originate from the real authenticated browser context
+//     (real Chrome TLS, cookies, UA, sec-ch-ua, accept-encoding).
+//   - 4 graphql calls/day uses ~1% of the 500/15min rate-limit budget.
+//   - x-csrf-token is read from the ct0 cookie (same way SPA does).
+//   - Bearer token is captured from the SPA's first request and reused.
+//   - Random 8-15s delay between pages.
+//
+// Rollback: copy src/list-feed-scraper.js.bak-2026-05-01 → list-feed-scraper.js
 //
 // Backward-compatible signature: scrapeListFeed(overrideCdpPort) returns
 //   Array<{author, text, datetime, tweetUrl, images}>
@@ -15,9 +28,8 @@ import WebSocket from 'ws';
 import fetch from 'node-fetch';
 import { config } from './config.js';
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function rand(min, max) { return Math.floor(min + Math.random() * (max - min)); }
 
 function withTimeout(promise, ms, label) {
   if (!ms || ms <= 0) return promise;
@@ -35,7 +47,7 @@ class CdpClient {
     this.ws = ws;
     this.nextId = 1;
     this.pending = new Map();
-    this.listeners = new Map(); // method -> array of fn
+    this.listeners = new Map();
     ws.on('message', raw => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -109,9 +121,8 @@ function parseTimelineResponse(json) {
   try {
     const instructions = json?.data?.list?.tweets_timeline?.timeline?.instructions || [];
     for (const ins of instructions) {
-      const entries = ins.entries || ins.entry ? (ins.entries || [ins.entry]) : [];
+      const entries = ins.entries || (ins.entry ? [ins.entry] : []);
       for (const e of entries) {
-        // cursor entries
         const cursorVal = e?.content?.value;
         const cursorType = e?.content?.cursorType;
         if (cursorType === 'Bottom' && cursorVal) {
@@ -120,21 +131,16 @@ function parseTimelineResponse(json) {
         }
         const r = e?.content?.itemContent?.tweet_results?.result;
         if (!r) continue;
-        // unwrap TweetWithVisibilityResults
         const tweetObj = r.__typename === 'TweetWithVisibilityResults' ? r.tweet : r;
         const legacy = tweetObj?.legacy;
         if (!legacy) continue;
 
-        const userR =
-          tweetObj?.core?.user_results?.result ||
-          r?.core?.user_results?.result;
-        // X moved screen_name from legacy to core (2026)
+        const userR = tweetObj?.core?.user_results?.result || r?.core?.user_results?.result;
         const screenName =
           userR?.core?.screen_name ||
           userR?.legacy?.screen_name ||
           '';
 
-        // Resolve full_text (may be truncated for retweets)
         let text = legacy.full_text || '';
         const rt = legacy.retweeted_status_result?.result;
         if (rt) {
@@ -147,24 +153,18 @@ function parseTimelineResponse(json) {
           if (rtFull) text = `RT @${rtUser}: ${rtFull}`;
         }
 
-        // images (from extended_entities.media or entities.media)
         const images = [];
-        const media =
-          legacy.extended_entities?.media ||
-          legacy.entities?.media ||
-          [];
+        const media = legacy.extended_entities?.media || legacy.entities?.media || [];
         for (const m of media) {
           let url = m.media_url_https || m.media_url || '';
           if (url) {
-            // Use large variant
             url = url.includes('?') ? url : `${url}?name=large`;
             images.push(url);
           }
         }
 
         const id = legacy.id_str || tweetObj?.rest_id || '';
-        const created = legacy.created_at || ''; // "Sun Apr 27 05:32:35 +0000 2026"
-        // ISO datetime
+        const created = legacy.created_at || '';
         let datetime = '';
         if (created) {
           const d = new Date(created);
@@ -173,7 +173,7 @@ function parseTimelineResponse(json) {
         const author = screenName ? `@${screenName}` : '';
         const tweetUrl = screenName && id ? `https://x.com/${screenName}/status/${id}` : '';
 
-        out.push({ author, text: text.substring(0, 800), datetime, tweetUrl, images });
+        out.push({ author, text: text.substring(0, 800), datetime, tweetUrl, images, _id: id });
       }
     }
   } catch (e) {
@@ -190,14 +190,25 @@ export async function scrapeListFeed(overrideCdpPort) {
   const host = cfg.cdpHost || '127.0.0.1';
   const port = overrideCdpPort != null ? Number(overrideCdpPort) : Number(cfg.cdpPort || 18800);
 
+  // Pagination knobs (can be overridden by env)
+  // Dynamic strategy: paginate until oldest tweet is older than cutoff,
+  // OR maxPagesHardLimit reached (safety net). Default cutoff = 24h + 2h buffer.
+  const maxPagesHardLimit = Number(process.env.LIST_FEED_PAGES_HARD_LIMIT) || cfg.maxPagesHardLimit || 12;
+  const cutoffHours = Number(process.env.LIST_FEED_CUTOFF_HOURS) || cfg.cutoffHours || 26;
+  const cutoffMs = Date.now() - cutoffHours * 3600 * 1000;
+  // Legacy LIST_FEED_PAGES still honored as override (e.g. for one-off backfills)
+  const fixedPages = Number(process.env.LIST_FEED_PAGES) || 0;
+  const pageWaitMs = Number(process.env.LIST_FEED_PAGE_WAIT_MS) || cfg.pageWaitMs || 9000;
+  const delayMin = Number(process.env.LIST_FEED_PAGE_DELAY_MIN_MS) || 8000;
+  const delayMax = Number(process.env.LIST_FEED_PAGE_DELAY_MAX_MS) || 15000;
+
   console.log(`[list-feed] CDP target: ${host}:${port}`);
   console.log(`[list-feed] URL: ${cfg.url}`);
-  console.log('[list-feed] Mode: graphql-capture (DOM-independent)');
-
-  // How many graphql pages to capture. Default 4 (~4*90 = 360 tweets), enough
-  // for a daily digest with 24h filtering. Configurable via LIST_FEED_PAGES.
-  const maxPages = Number(process.env.LIST_FEED_PAGES) || cfg.maxPages || 4;
-  const pageWaitMs = Number(process.env.LIST_FEED_PAGE_WAIT_MS) || cfg.pageWaitMs || 8000;
+  if (fixedPages) {
+    console.log(`[list-feed] Mode: fixed ${fixedPages} pages (LIST_FEED_PAGES override), ${delayMin}-${delayMax}ms between`);
+  } else {
+    console.log(`[list-feed] Mode: dynamic cursor-paginate (cutoff=${cutoffHours}h, hardLimit=${maxPagesHardLimit} pages, ${delayMin}-${delayMax}ms between)`);
+  }
 
   let ws, freshTargetId = null;
   try {
@@ -223,101 +234,203 @@ export async function scrapeListFeed(overrideCdpPort) {
 
     const cdp = new CdpClient(ws);
 
-    // Capture timeline responses
-    const timelineRequests = []; // {requestId, url}
+    // Capture the SPA's first ListLatestTweetsTimeline request — we need its
+    // headers (Bearer, x-csrf-token, etc) and URL params (queryId, features).
+    const captured = [];
+    const reqMeta = new Map();
+    cdp.on('Network.requestWillBeSent', params => {
+      const url = params?.request?.url || '';
+      if (url.includes('ListLatestTweetsTimeline')) {
+        reqMeta.set(params.requestId, params.request);
+      }
+    });
     cdp.on('Network.responseReceived', params => {
       const url = params?.response?.url || '';
       if (url.includes('ListLatestTweetsTimeline')) {
-        timelineRequests.push({ requestId: params.requestId, url });
+        captured.push({
+          requestId: params.requestId,
+          url,
+          status: params.response.status,
+          requestHeaders: reqMeta.get(params.requestId)?.headers || {},
+        });
       }
-    });
-    cdp.on('Network.loadingFailed', params => {
-      // ignore for now; we'll just see fewer responses
     });
 
     await cdp.send('Network.enable');
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
 
-    // Patch navigator.webdriver before any page load (cheap "stealth" — does not
-    // affect today's behaviour but may help if X tightens detection later).
     try {
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
         source: `Object.defineProperty(navigator, 'webdriver', {get: () => undefined});`
       });
     } catch {}
 
-    // Initial navigation
     console.log(`[list-feed] Navigating to list (page 1)...`);
     await cdp.send('Page.navigate', { url: cfg.url }, 15000);
-    try {
-      // wait for load event but don't fail if it never fires
-      await new Promise((res, rej) => {
-        const t = setTimeout(() => rej(new Error('loadEventFired timeout')), 30000);
-        const wrap = () => { clearTimeout(t); res(); };
-        cdp.on('Page.loadEventFired', wrap);
-      });
-    } catch (e) {
-      console.warn(`[list-feed] loadEventFired wait: ${e.message} (continuing)`);
-    }
     await sleep(pageWaitMs);
 
-    // Trigger more graphql pages by scrolling. Even if DOM doesn't render
-    // the new tweets, the scroll handler will issue paginated graphql requests
-    // for IntersectionObserver targets in the timeline.
-    for (let page = 1; page < maxPages; page++) {
-      console.log(`[list-feed] Triggering page ${page + 1}/${maxPages} via scroll...`);
-      // Programmatic scrolls + dispatch scroll events
-      for (let s = 0; s < 6; s++) {
-        await cdp.send('Runtime.evaluate', {
-          expression: `
-            window.scrollTo({top: window.scrollY + 1500, behavior: 'auto'});
-            window.dispatchEvent(new Event('scroll', {bubbles: true}));
-          `
-        }).catch(() => {});
-        await sleep(800);
-      }
-      await sleep(pageWaitMs);
+    if (captured.length === 0) {
+      console.warn('[list-feed] 0 ListLatestTweetsTimeline responses captured — cookie expired or list URL wrong?');
+      return [];
     }
 
-    console.log(`[list-feed] Captured ${timelineRequests.length} ListLatestTweetsTimeline response(s)`);
+    const first = captured[0];
+    const queryIdMatch = first.url.match(/graphql\/([^/]+)\/ListLatestTweetsTimeline/);
+    const queryId = queryIdMatch ? queryIdMatch[1] : null;
+    const u = new URL(first.url);
+    const variables = JSON.parse(u.searchParams.get('variables'));
+    const features = JSON.parse(u.searchParams.get('features'));
+    const bearerHeader = first.requestHeaders['authorization'] || '';
 
-    // Pull bodies and parse
+    if (!queryId || !bearerHeader) {
+      console.warn(`[list-feed] missing queryId or bearer (queryId=${queryId}, bearer=${bearerHeader.length}b)`);
+      return [];
+    }
+
+    // Parse first page
     const allTweets = new Map();
-    let pageNum = 0;
-    for (const req of timelineRequests) {
-      pageNum++;
+    function ingest(json, label) {
+      const { tweets, nextCursor } = parseTimelineResponse(json);
+      let added = 0;
+      for (const t of tweets) {
+        const key = t.tweetUrl || t._id || `${t.author}|${t.datetime}|${t.text.substring(0, 50)}`;
+        if (!allTweets.has(key)) {
+          allTweets.set(key, t);
+          added++;
+        }
+      }
+      console.log(`[list-feed]   ${label}: parsed=${tweets.length}, new=${added}, total=${allTweets.size}, nextCursor=${nextCursor ? 'OK' : 'NULL'}`);
+      return nextCursor;
+    }
+
+    // Track oldest tweet datetime seen so far → used to decide when we've
+    // covered the cutoff window.
+    let oldestSeenMs = Infinity;
+    function updateOldest(json) {
       try {
-        const body = await cdp.send('Network.getResponseBody', { requestId: req.requestId }, 10000);
-        const txt = body.body || '';
-        const json = JSON.parse(txt);
         const { tweets } = parseTimelineResponse(json);
-        let added = 0;
         for (const t of tweets) {
-          const key = t.tweetUrl || `${t.author}|${t.datetime}|${t.text.substring(0, 50)}`;
-          if (!allTweets.has(key)) {
-            allTweets.set(key, t);
-            added++;
+          if (t.datetime) {
+            const ts = Date.parse(t.datetime);
+            if (!Number.isNaN(ts) && ts < oldestSeenMs) oldestSeenMs = ts;
           }
         }
-        console.log(`[list-feed]   page ${pageNum}: body=${(txt.length / 1024).toFixed(0)}K, parsed=${tweets.length}, new=${added}`);
-      } catch (e) {
-        console.warn(`[list-feed]   page ${pageNum}: ${e.message}`);
+      } catch {}
+    }
+
+    let cursor = null;
+    try {
+      const body = await cdp.send('Network.getResponseBody', { requestId: first.requestId }, 12000);
+      const json = JSON.parse(body.body);
+      cursor = ingest(json, 'page 1');
+      updateOldest(json);
+    } catch (e) {
+      console.warn(`[list-feed] failed to parse page 1: ${e.message}`);
+    }
+
+    // Decide stop condition for each iteration:
+    // - If LIST_FEED_PAGES set → stop at fixedPages
+    // - Otherwise → stop when oldest seen <= cutoff OR hardLimit reached
+    const limit = fixedPages || maxPagesHardLimit;
+    // Cursor-paginate via page-context fetch
+    for (let p = 2; p <= limit; p++) {
+      if (!cursor) {
+        console.log(`[list-feed] no cursor for page ${p}, stopping early`);
+        break;
       }
+      // Dynamic stop: have we covered the cutoff window already?
+      if (!fixedPages && oldestSeenMs <= cutoffMs) {
+        const oldestStr = new Date(oldestSeenMs).toISOString();
+        const cutoffStr = new Date(cutoffMs).toISOString();
+        console.log(`[list-feed] covered cutoff (oldest=${oldestStr} <= cutoff=${cutoffStr}), stopping at page ${p - 1}`);
+        break;
+      }
+      const delay = rand(delayMin, delayMax);
+      console.log(`[list-feed] sleeping ${(delay / 1000).toFixed(1)}s before page ${p}/${limit}...`);
+      await sleep(delay);
+
+      const vars = { ...variables, cursor };
+      const url = `https://x.com/i/api/graphql/${queryId}/ListLatestTweetsTimeline` +
+        `?variables=${encodeURIComponent(JSON.stringify(vars))}` +
+        `&features=${encodeURIComponent(JSON.stringify(features))}`;
+
+      // Run fetch *inside* the page so the browser auto-attaches all real
+      // cookies, TLS fingerprint, sec-ch-ua-*, accept-encoding, etc. We
+      // explicitly set the X-required headers (csrf, bearer, auth-type).
+      const expr = `
+        (async () => {
+          try {
+            const ct0Match = document.cookie.match(/(?:^|;\\s*)ct0=([^;]+)/);
+            const ct0 = ct0Match ? ct0Match[1] : '';
+            const headers = {
+              'accept': '*/*',
+              'accept-language': 'zh-cn',
+              'authorization': ${JSON.stringify(bearerHeader)},
+              'content-type': 'application/json',
+              'x-csrf-token': ct0,
+              'x-twitter-active-user': 'yes',
+              'x-twitter-auth-type': 'OAuth2Session',
+              'x-twitter-client-language': 'zh-cn',
+            };
+            const r = await fetch(${JSON.stringify(url)}, {
+              method: 'GET',
+              credentials: 'include',
+              headers,
+            });
+            const text = await r.text();
+            return { status: r.status, bodyLen: text.length, body: text };
+          } catch (e) {
+            return { error: e.message };
+          }
+        })()
+      `;
+      let res;
+      try {
+        const ev = await cdp.send('Runtime.evaluate', {
+          expression: expr,
+          awaitPromise: true,
+          returnByValue: true,
+        }, 25000);
+        res = ev.result?.value;
+      } catch (e) {
+        console.warn(`[list-feed] page ${p} CDP eval error: ${e.message}`);
+        break;
+      }
+      if (!res || res.error) {
+        console.warn(`[list-feed] page ${p} fetch error: ${res?.error || 'no result'}`);
+        break;
+      }
+      if (res.status !== 200) {
+        console.warn(`[list-feed] page ${p} HTTP ${res.status}, body sample: ${(res.body || '').slice(0, 300)}`);
+        break;
+      }
+
+      let json;
+      try {
+        json = JSON.parse(res.body);
+      } catch (e) {
+        console.warn(`[list-feed] page ${p} JSON parse: ${e.message}`);
+        break;
+      }
+      const next = ingest(json, `page ${p}`);
+      updateOldest(json);
+      if (next === cursor) {
+        console.log('[list-feed] cursor unchanged → end of feed');
+        break;
+      }
+      cursor = next;
+    }
+    if (!fixedPages && oldestSeenMs > cutoffMs) {
+      console.warn(`[list-feed] WARN: hit hardLimit (${maxPagesHardLimit} pages) before reaching cutoff (${cutoffHours}h). Tail may be missing.`);
     }
 
-    const out = Array.from(allTweets.values());
+    const out = Array.from(allTweets.values()).map(t => {
+      // strip internal _id
+      const { _id, ...rest } = t;
+      return rest;
+    });
     console.log(`[list-feed] Extracted tweets: ${out.length}`);
-
-    // If we got 0 tweets but had requests, something is wrong (parsing or empty list)
-    if (out.length === 0 && timelineRequests.length > 0) {
-      console.warn('[list-feed] 0 tweets parsed despite captured responses; structure may have changed');
-    }
-    // If 0 captured responses at all, page may be redirected to login or X is blocking
-    if (timelineRequests.length === 0) {
-      console.warn('[list-feed] 0 ListLatestTweetsTimeline responses captured — cookie expired or list URL wrong?');
-    }
-
     return out;
   } catch (err) {
     console.error('[list-feed] Scrape failed:', err);

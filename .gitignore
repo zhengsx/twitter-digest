@@ -6,3 +6,6 @@ logs/
 *.log
 .DS_Store
 src/list-feed-scraper.js.bak-*
+scripts/test_proposed_summary.js.bak
+outputs/
+tmp/

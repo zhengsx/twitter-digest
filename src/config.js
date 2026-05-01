@@ -16,6 +16,10 @@ export const config = {
     pageLoadDelay: Number(process.env.LIST_FEED_PAGE_LOAD_DELAY || 8000),
     // Additional safety for slow loads; scraper will still wait pageLoadDelay afterwards.
     pageLoadTimeoutMs: Number(process.env.LIST_FEED_PAGE_LOAD_TIMEOUT_MS || 30000),
+    // Dynamic cursor pagination: stop when oldest tweet older than cutoffHours,
+    // OR maxPagesHardLimit reached. LIST_FEED_PAGES env still honored for fixed-page override.
+    cutoffHours: Number(process.env.LIST_FEED_CUTOFF_HOURS || 26),
+    maxPagesHardLimit: Number(process.env.LIST_FEED_PAGES_HARD_LIMIT || 12),
   },
   // 关注用户列表 (逗号分隔)
   followingUsers: process.env.FOLLOWING_USERS 
